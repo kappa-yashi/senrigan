@@ -88,6 +88,12 @@ description — rather than dropping the check.
 
 | finding | what it means | fix |
 |---|---|---|
+| canonical points at a file | an image URL was pasted into the canonical / alternate field | the canonical is the page's own URL; the image goes in og:image |
+| canonical is a URL that redirects here | `/human` declared, `/human/` served (or `.html` vs clean URL) — the canonical never answers 200 | align canonical, sitemap and links with what the host actually serves |
+| `lang` disagrees with the title's script | language declared wrong, or a title copied across languages | lang from the route; translate the title |
+| `<h1>` is a sentence | the first paragraph sits in the heading | the name of the thing in the `<h1>`, the sentence in a `<p>` |
+| article page without Article schema | the page's JSON-LD is only the business entity | add `BlogPosting`/`Article` with headline = h1, dates, author, image |
+| N/N pages: … — site-wide | the template, not the pages | fix it once; the bracketed hint names the platform setting |
 | `noindex` yet listed in the sitemap | you ask for indexing and refuse it in the same breath | drop it from the sitemap, or remove the noindex |
 | utility page indexable | `/search`, `/version`, `/404` compete with real pages | `noindex, follow` in the template |
 | N more pages: no canonical / no h1 | a whole route family shares a template without them | fix the template; text-only mirrors get a canonical to the HTML page or `noindex` |

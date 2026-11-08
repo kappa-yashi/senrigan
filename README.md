@@ -33,8 +33,11 @@ or clone and run `node bin/senrigan.mjs <target>`.
   invalid or future `<lastmod>`, one identical `<lastmod>` everywhere (a build
   timestamp, which Google learns to ignore), mixed trailing-slash styles,
   listed URLs that redirect or 404, indexable pages that are not listed
+- all `Sitemap:` lines are merged; a `robots.txt` that blocks `*` is a failure
+  only when no `Allow: /` rescues it, and the offending group is named
 - `favicon.ico`, `apple-touch-icon.png`, declared icons and the web manifest
   answer 200 (devices request them blindly; each 404 is wasted crawl)
+- the home document's size (a multi-megabyte HTML page is reported)
 - `llms.txt` / `llms-full.txt` when present: H1, summary blockquote, links
   resolve, served as text
 
@@ -46,8 +49,12 @@ or clone and run `node bin/senrigan.mjs <target>`.
 - `<title>`: present, 15–60 characters, unique across the scanned pages
 - meta description: present, ≤160 characters, unique
 - canonical: present, absolute, `https`, same host, self-referencing; a
-  trailing-slash disagreement between canonical and served path is its own
-  finding
+  canonical that points at a **file** (an image URL pasted into the SEO
+  field) is a failure, and so is a canonical that names a URL which
+  **redirects** to the page (the `/human` vs `/human/` trap); a plain
+  trailing-slash disagreement is a warning
+- `<html lang>` vs the script of the title (`lang="en"` on a Greek title)
+- a title template that appends the same long suffix to every page
 - **indexing matrix**: `noindex` on a page that is also in the sitemap is a
   failure; `noindex` on a content-looking page is a warning; a utility page
   (search, version, 404…) without `noindex` is a warning; a tag / archive page
@@ -61,7 +68,8 @@ or clone and run `node bin/senrigan.mjs <target>`.
 
 - heading skeleton, four rules: exactly one `<h1>`; no level jumps
   (`h2 → h4`); the first sub-heading is an `<h2>`; no empty heading tags.
-  Inline SVG wordmarks count by their `aria-label` / `<title>`
+  Inline SVG wordmarks count by their `aria-label` / `<title>`; an `<h1>`
+  that is a whole sentence (the first paragraph put in the heading) is flagged
 - DOM size against the Lighthouse limits (1 500 nodes, depth 32) — a
   warning, never the verdict
 - images: missing `alt` is a failure (`alt=""` for decorative images is
@@ -87,6 +95,9 @@ or clone and run `node bin/senrigan.mjs <target>`.
 
 **Layer 4 — machine-readable & social**
 
+- a page that looks like an article (blog path, or a single `<article>` with
+  a `<time>`) but carries no `Article`/`BlogPosting` type
+- legal pages (privacy, terms, cookies…) without JSON-LD are noted, not warned
 - JSON-LD parses; `@context` present; types listed; required fields per type
   (`Article`/`BlogPosting`: headline, datePublished, author, image;
   `Organization`/`Person`/`WebSite`: name, url; `BreadcrumbList`: positions,
@@ -103,6 +114,17 @@ or clone and run `node bin/senrigan.mjs <target>`.
   tokenised with English and Greek stop-words and a light stemmer; the top
   five terms are compared with the title and the `<h1>`. Zero overlap is
   reported as a possible intent mismatch. Listing pages are skipped.
+
+**Site-wide collapse and platform hints**
+
+A finding that repeats on most scanned pages is one finding about the
+template, so the report says `9/9 pages: no rel="canonical" — site-wide`
+once instead of nine times. The platform is detected from the generator
+meta or the asset hosts (Webflow, Wix, WordPress, Squarespace, Shopify,
+Framer, Astro, Next.js…) and relevant findings carry a hint in brackets
+pointing at that platform's setting — `[Webflow: Site settings → SEO →
+"Global canonical tag URL"]`. Greek and Latin-1 named entities
+(`&alpha;&beta;`) are decoded, so headings on page-builder sites read as text.
 
 ## Options
 
