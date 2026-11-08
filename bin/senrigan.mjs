@@ -363,7 +363,7 @@ function semantic(h, L) {
 }
 
 // ───────────────────────────── live mode ─────────────────────────────
-const UA = 'senrigan/0.2.0 (+static site visibility check; read-only)';
+const UA = 'senrigan/0.2.1 (+static site visibility check; read-only)';
 async function get(url, { redirect = 'manual', method = 'GET' } = {}) {
   url = toLocal(url);
   const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 15000);

@@ -1,6 +1,6 @@
 {
   "name": "@kappa-yashi/senrigan",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "senrigan (千里眼) — static site visibility & structure check: head, headings, links, sitemap, structured data. Zero dependencies.",
   "type": "module",
   "bin": { "senrigan": "bin/senrigan.mjs" },
