@@ -1,0 +1,12 @@
+{
+  "name": "@kappa-yashi/senrigan",
+  "version": "0.1.0",
+  "description": "senrigan (千里眼) — static site visibility & structure check: head, headings, links, sitemap, structured data. Zero dependencies.",
+  "type": "module",
+  "bin": { "senrigan": "bin/senrigan.mjs" },
+  "files": ["bin", "SKILL.md", "reference", "README.md", "LICENSE"],
+  "engines": { "node": ">=18" },
+  "keywords": ["senrigan", "seo", "structured-data", "json-ld", "sitemap", "hreflang", "static-site", "astro", "claude-skill"],
+  "repository": { "type": "git", "url": "https://github.com/kappa-yashi/senrigan" },
+  "license": "MIT"
+}
