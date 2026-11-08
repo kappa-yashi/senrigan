@@ -1,3 +1,5 @@
+<img width="2048" height="1143" alt="Senrigan 千里眼-emblem-git-readme" src="https://github.com/user-attachments/assets/93277701-43e3-46ae-b23e-2ee0c485a374" />
+
 # senrigan (千里眼)
 
 Static site visibility & structure check.
