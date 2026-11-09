@@ -112,7 +112,11 @@ function inspect(html) {
   // an inline <svg> becomes its accessible name (aria-label or <title>), so a wordmark inside an <h1> or <a> still counts as text
   const svgName = (svg) => { const open = svg.match(/<svg\b([^>]*)>/i)?.[1] || ''; return attr(open, 'aria-label') || stripTags(svg.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || '') || ''; };
   const clean = body.replace(/<!--[\s\S]*?-->/g, '').replace(/<(script|style|noscript|template)\b[\s\S]*?<\/\1>/gi, '').replace(/<svg\b[\s\S]*?<\/svg>/gi, (svg) => ` ${svgName(svg)} `);
-  for (const m of clean.matchAll(/<h([1-6])\b([^>]*)>([\s\S]*?)<\/h\1>/gi)) o.headings.push({ level: Number(m[1]), text: stripTags(m[3].replace(/<img\b([^>]*)>/gi, (x, a) => attr(a, 'alt') || '')) || attr(m[2], 'aria-label') || '', attrs: m[2] });
+  // real heading tags and role="heading" elements, in document order (a <div role="heading" aria-level="1"> is still an h1 to assistive tech and to the outline)
+  for (const m of clean.matchAll(/<h([1-6])\b([^>]*)>([\s\S]*?)<\/h\1>|<(div|span|p|strong|b)\b([^>]*\brole\s*=\s*["']heading["'][^>]*)>([\s\S]*?)<\/\4>/gi)) {
+    if (m[1]) { o.headings.push({ level: Number(m[1]), text: stripTags(m[3].replace(/<img\b([^>]*)>/gi, (x, a) => attr(a, 'alt') || '')) || attr(m[2], 'aria-label') || '', attrs: m[2] }); continue; }
+    const lvl = Number(attr(m[5], 'aria-level')) || 2; o.headings.push({ level: Math.min(6, Math.max(1, lvl)), text: stripTags(m[6]) || attr(m[5], 'aria-label') || '', attrs: m[5], role: true });
+  }
   for (const m of clean.matchAll(/<img\b([^>]*)>/gi)) { const a = m[1]; o.images.push({ src: attr(a, 'src') || attr(a, 'data-src') || '', alt: attr(a, 'alt'), loading: (attr(a, 'loading') || '').toLowerCase(), decoding: (attr(a, 'decoding') || '').toLowerCase(), width: attr(a, 'width'), height: attr(a, 'height'), fetchpriority: attr(a, 'fetchpriority') }); }
   for (const m of clean.matchAll(/<a\b([^>]*)>([\s\S]*?)<\/a>/gi)) {
     const a = m[1]; const inner = m[2];
@@ -141,7 +145,7 @@ function inspect(html) {
 }
 
 // ───────────────────────────── shared page checks (Layers 1, 2, 4, 5) ─────────────────────────────
-const ctx = { origin: '', https: true, mode: 'live', local: false, aliasOrigin: '', platform: '', redirectedFrom: '', pages: [], titles: new Map(), descs: new Map(), slashPolicy: null, hrefs: new Set(), sitemapUrls: new Set(), internalLinked: new Set(), linkTargets: new Map(), externalOrigins: new Set(), preconnects: new Set() };
+const ctx = { origin: '', https: true, mode: 'live', local: false, aliasOrigin: '', platform: '', redirectedFrom: '', productSite: '', kekkai: [], pages: [], titles: new Map(), descs: new Map(), slashPolicy: null, hrefs: new Set(), sitemapUrls: new Set(), internalLinked: new Set(), linkTargets: new Map(), externalOrigins: new Set(), preconnects: new Set() };
 // ── platform detection: the fix for most findings lives in a settings screen, and the screen differs per platform
 function detectPlatform(h) {
   const g = (h.generator || '').toLowerCase(); const hosts = [...h.assetHosts].join(' ');
@@ -162,6 +166,17 @@ const HINTS = {
   WordPress: { title: 'the SEO plugin title template appends the site name + tagline — shorten the template', h1: 'page builders split one headline into two heading blocks — make the second a paragraph', 'img-dim': 'the media library knows the dimensions; a lazy-load plugin or theme filter is stripping them' },
   Astro: { 'canonical-slash': 'astro.config: trailingSlash + build.format must agree with the host redirect', slash: 'astro.config: trailingSlash + build.format', 'sitemap-gap': '@astrojs/sitemap with i18n configured, or a custom endpoint that walks every locale' },
 };
+// entities that make the legal pages part of the product (terms, licence, privacy are what the user agrees to)
+const PRODUCT_RE = /"@type"\s*:\s*(?:\[[^\]]*)?"(SoftwareApplication|MobileApplication|WebApplication|VideoGame|Product|Service|ProfessionalService|FinancialService|Course|Event|Store|OnlineStore|MedicalClinic|LegalService)"/;
+// things senrigan sees but kekkai owns: noted once, with the command to run
+const LEGAL_LINK = (t) => (/Service$/.test(t) ? 'termsOfService' : /Application$|VideoGame/.test(t) ? 'license' : '');
+function legalLinkCheck(t, ldText) {
+  const prop = LEGAL_LINK(t); if (!prop) return;
+  section('Machine-readable & social');
+  if (!new RegExp(`"${prop}"`).test(ldText)) warn('terms-link', `the ${t} entity has no ${prop} — its legal pages are not connected to it in the graph (schema.org: ${prop === 'license' ? 'license is how a CreativeWork such as software points at its terms / EULA' : 'termsOfService belongs to Service'})`);
+  else pass('terms-link', `${t} entity links its ${prop}`);
+}
+const KEKKAI = (why) => { if (!ctx.kekkai.includes(why)) ctx.kekkai.push(why); };
 const H = (id) => { const h = HINTS[ctx.platform]?.[id]; return h ? ` [${ctx.platform}: ${h}]` : ''; };
 const abs = (href, base) => { try { return new URL(href, base).href; } catch { return null; } };
 const isHttp = (u) => /^https?:\/\//i.test(u || '');
@@ -204,7 +219,8 @@ function pageChecks(h, pageUrl, label) {
   else if (ctx.origin && !sameHost(h.canonical)) warn('canonical', `${L}canonical points to another host: ${h.canonical}${H('canonical')}`);
   else if (here) {
     const c = new URL(h.canonical);
-    if (normPath(c.pathname) !== normPath(here.pathname)) warn('canonical', `${L}canonical ${c.pathname} is not self-referencing (page is ${here.pathname}) — fine only if this page is a deliberate duplicate`);
+    if (ctx.mode === 'dist' && /\.html?$/i.test(c.pathname) && normPath(c.pathname.replace(/\.html?$/i, '')) === normPath(here.pathname)) warn('canonical-html', `${L}canonical ${c.pathname} keeps the .html extension — hosts with clean URLs (Cloudflare Pages, Netlify, Vercel) answer it with a redirect, which makes it a canonical that does not serve the page; verify with a live scan`);
+    else if (normPath(c.pathname) !== normPath(here.pathname)) warn('canonical', `${L}canonical ${c.pathname} is not self-referencing (page is ${here.pathname}) — fine only if this page is a deliberate duplicate`);
     else if (c.pathname !== here.pathname && ctx.redirectedFrom && new URL(ctx.redirectedFrom).pathname === c.pathname) fail('canonical-redirect', `${L}canonical ${c.pathname} is a URL that redirects to this page (${here.pathname}) — the page declares as canonical an address that does not serve it${H('canonical-slash')}`);
     else if (c.pathname !== here.pathname) warn('canonical-slash', `${L}canonical ${c.pathname} differs from the served path ${here.pathname} by a trailing slash — pick one policy and redirect the other${H('canonical-slash')}`);
     else if (c.search) warn('canonical', `${L}canonical carries a query string (${c.search})`);
@@ -247,7 +263,7 @@ function pageChecks(h, pageUrl, label) {
   section('Structure');
   const hs = h.headings;
   const h1s = hs.filter((x) => x.level === 1);
-  if (h1s.length === 0) fail('h1', `${L}no <h1>`); else if (h1s.length > 1) fail('h1', `${L}${h1s.length} <h1> elements: ${h1s.map((x) => `"${x.text.slice(0, 40)}"`).join(', ')}${H('h1')}`);
+  if (h1s.length === 0) fail('h1', `${L}no <h1>`); else if (h1s.length > 1) fail('h1', `${L}${h1s.length} <h1> elements: ${h1s.map((x) => `"${x.text.slice(0, 40)}"${x.role ? ' (role="heading" aria-level="1")' : ''}`).join(', ')}${h1s.some((x) => x.role) ? ' — an ARIA heading is still a heading; two languages on one page need two routes with hreflang' : ''}${H('h1')}`);
   else if ([...h1s[0].text].length > 120 || ([...h1s[0].text].length > 70 && /[.;!?]$/.test(h1s[0].text))) warn('h1-body', `${L}the <h1> is a sentence, not a title (${[...h1s[0].text].length} chars: "${h1s[0].text.slice(0, 60)}…") — the first paragraph was put in the heading; the name of the thing belongs there`);
   else pass('h1', `${L}one <h1>: "${h1s[0].text.slice(0, 70)}"`);
   const empties = hs.filter((x) => !x.text); if (empties.length) fail('h-empty', `${L}${empties.length} empty heading tag(s) (h${empties.map((e) => e.level).join(', h')})`);
@@ -296,7 +312,12 @@ function pageChecks(h, pageUrl, label) {
   const LEGAL_RE = /\/(?:privacy|terms|legal|cookies?|accessibility|imprint|impressum|gdpr|politiki|oroi|aporrit|prosvasim)[^/]*(?:\/|$)/i;
   const BLOG_RE = /\/(?:blog|posts?|news|articles?|journal|stories|arthra|nea)\/[^/?#]+/i;
   const ldTypesStr = JSON.stringify(h.jsonld);
-  if (!h.jsonld.length && !h.jsonldErrors.length) { if (LEGAL_RE.test(path)) info('jsonld', `${L}no JSON-LD (legal page — no rich result to earn here)`); else warn('jsonld', `${L}no JSON-LD — no rich results, no entity for the knowledge graph`); }
+  const legal = LEGAL_RE.test(path);
+  if (!h.jsonld.length && !h.jsonldErrors.length) {
+    if (legal && ctx.productSite) warn('jsonld-legal', `${L}legal page without JSON-LD on a ${ctx.productSite} site — the terms and the privacy policy are part of what the ${ctx.productSite} offers: give the page a WebPage node (isPartOf the WebSite, about the ${ctx.productSite})${LEGAL_LINK(ctx.productSite) ? ` and point the ${ctx.productSite} at it with ${LEGAL_LINK(ctx.productSite)}` : ''}`);
+    else if (legal) info('jsonld', `${L}no JSON-LD (legal page of a non-product site)`);
+    else warn('jsonld', `${L}no JSON-LD — no rich results, no entity for the knowledge graph`);
+  }
   else if (nodesLd.length) {
     if ((BLOG_RE.test(path) || (h.articleTag && h.times.length)) && !/"(?:CollectionPage|ItemList|SearchResultsPage)"/.test(ldTypesStr) && !/"(?:Article|BlogPosting|NewsArticle|TechArticle|ScholarlyArticle)"/.test(ldTypesStr)) warn('jsonld-article', `${L}looks like an article (${BLOG_RE.test(path) ? 'blog path' : '<article> + <time>'}) but the JSON-LD has no Article/BlogPosting — no article rich results, no Discover`);
     const types = nodesLd.map((n) => [].concat(n['@type']).join('/'));
@@ -363,7 +384,7 @@ function semantic(h, L) {
 }
 
 // ───────────────────────────── live mode ─────────────────────────────
-const UA = 'senrigan/0.2.1 (+static site visibility check; read-only)';
+const UA = 'senrigan/0.3.0 (+static site visibility check; read-only)';
 async function get(url, { redirect = 'manual', method = 'GET' } = {}) {
   url = toLocal(url);
   const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 15000);
@@ -425,11 +446,12 @@ async function liveScan(input) {
   const local = /^(localhost|127\.|0\.0\.0\.0|\[::1\]|192\.168\.|10\.)/.test(finalUrl.hostname);
   if (local) { const canon = doc.text.match(/<link[^>]+rel\s*=\s*["']canonical["'][^>]*href\s*=\s*["']([^"']*)["']/i)?.[1] || doc.text.match(/<link[^>]+href\s*=\s*["']([^"']*)["'][^>]*rel\s*=\s*["']canonical["']/i)?.[1]; if (canon && isHttp(canon) && !/\.(?:jpe?g|png|gif|webp|svg|pdf)(?:[?#]|$)/i.test(canon)) ctx.aliasOrigin = new URL(canon).origin; ctx.local = true; info('local', `local address — host checks (https, www alias) skipped${ctx.aliasOrigin ? `; absolute URLs on ${new URL(ctx.aliasOrigin).host} are fetched from here` : ''}`); ctx.https = true; }
   else {
-    if (!ctx.https) warn('https', 'site served over http:// — https is a ranking signal and a prerequisite for most features');
+    if (!ctx.https) { warn('https', 'site served over http:// — https is a ranking signal and a prerequisite for most features'); KEKKAI('transport: the site is not on https'); }
     const other = finalUrl.hostname.startsWith('www.') ? finalUrl.hostname.slice(4) : `www.${finalUrl.hostname}`;
     const o = await get(`https://${other}/`);
-    if (o.status === 200) warn('alias', `https://${other}/ also serves 200 — two hosts, one content; 301 one to the other (canonicals alone are a hint, not a rule)`);
+    if (o.status === 200) { warn('alias', `https://${other}/ also serves 200 — two hosts, one content; 301 one to the other (canonicals alone are a hint, not a rule)`); KEKKAI('transport: two hosts answer 200 — the redirect and HSTS are kekkai territory'); }
     else if (o.status >= 300 && o.status < 400) pass('alias', `${other} → ${o.status} → ${o.headers.location || '?'}`);
+    if (!finalUrl.hostname.startsWith('www.') && finalUrl.hostname.split('.').length === 2) { info('apex-primary', `the primary host is the apex (${finalUrl.hostname}) — neutral for search, but www gives cookie isolation from subdomains and a plain CNAME for any CDN`); KEKKAI(`infrastructure: the apex ${finalUrl.hostname} is the primary host`); }
     else info('alias', `https://${other}/ answers ${o.status || o.error}`);
   }
   const xr = doc.headers['x-robots-tag']; if (xr && /noindex/i.test(xr)) fail('x-robots', `X-Robots-Tag: ${xr} on the home page`); else if (xr) info('x-robots', `X-Robots-Tag: ${xr}`);
@@ -495,6 +517,8 @@ async function liveScan(input) {
 
   // Layer 1/2/4 on the home page
   const home = inspect(doc.text);
+  ctx.productSite = (doc.text.match(PRODUCT_RE) || [])[1] || '';
+  if (ctx.productSite) legalLinkCheck(ctx.productSite, JSON.stringify(home.jsonld));
   ctx.platform = detectPlatform(home); if (ctx.platform) { section('Reach'); info('platform', `platform: ${ctx.platform}${home.generator ? ` (generator meta)` : ' (asset hosts)'} — hints in [brackets] point at that platform's settings`); }
   pageChecks(home, doc.url, '/');
   if (home.text.length < 200) warn('thin', '/: less than 200 characters of text in the served HTML — if the content arrives with JavaScript, crawlers see an empty page first');
@@ -525,7 +549,7 @@ async function liveScan(input) {
   section('Links & network');
   const P = ctx.pages;
   const tot = (k) => P.reduce((n, p) => n + p[k], 0);
-  if (tot('mixedSrc')) fail('mixed', `${tot('mixedSrc')} http:// resource(s) (img/script/css) on https pages — blocked or downgraded by browsers`);
+  if (tot('mixedSrc')) { fail('mixed', `${tot('mixedSrc')} http:// resource(s) (img/script/css) on https pages — blocked or downgraded by browsers`); KEKKAI('mixed content on https pages'); }
   if (tot('mixedHref')) warn('mixed-href', `${tot('mixedHref')} link(s) to http:// URLs — each is a hop through a redirect, or a dead site`);
   if (!tot('mixedSrc') && !tot('mixedHref')) pass('mixed', 'no mixed content, no http:// links');
   if (ctx.edgeLinks) info('edge-links', `${ctx.edgeLinks} link(s) rewritten by Cloudflare email obfuscation (/cdn-cgi/l/email-protection) — mailto: links that need JavaScript to work; crawlers see no address, which is usually the point`);
@@ -570,7 +594,11 @@ function distScan(dir) {
   section('Root assets');
   if (!opt.base) info('base', 'no --base <url>: canonical / og:url host checks and sitemap host checks are skipped');
   if (!htmls.length) { fail('dist', `no HTML files under ${dir}`); return; }
-  const routeOf = (f) => { const r = rel(f); return r.endsWith('/index.html') ? r.slice(0, -'index.html'.length) : r; };
+  // a route is what the host serves: dir/index.html → /dir/, page.html → /page (clean URLs: Cloudflare Pages, Netlify, Vercel)
+  const routeOf = (f) => { const r = rel(f); return r.endsWith('/index.html') ? r.slice(0, -'index.html'.length) : r.replace(/\.html?$/i, ''); };
+  ctx.cleanHtml = htmls.some((f) => !/\/index\.html?$/i.test(rel(f)) && !/\/404\.html?$/i.test(rel(f)));
+  const firstHome = htmls.find((f) => rel(f) === '/index.html');
+  if (firstHome) { const t = readFileSync(firstHome, 'utf8'); ctx.productSite = (t.match(PRODUCT_RE) || [])[1] || ''; if (ctx.productSite) { legalLinkCheck(ctx.productSite, t); section('Root assets'); } }
   const routes = new Map(htmls.map((f) => [normPath(routeOf(f)), f]));
   // routes that opt out of indexing are deliberately hidden (an admin page, a utility) — they are never orphans or sitemap gaps, and never printed
   const hidden = new Set([...routes].filter(([, f]) => /<meta[^>]+name\s*=\s*["']robots["'][^>]*noindex/i.test(readFileSync(f, 'utf8').slice(0, 20000))).map(([r]) => r));
@@ -585,13 +613,13 @@ function distScan(dir) {
   else {
     pass('sitemap', `${smF.length} sitemap file(s), ${smUrls.length} URLs`);
     const paths = smUrls.map((x) => { try { return new URL(x.loc).pathname; } catch { return x.loc; } });
-    const missing = paths.filter((p) => !routes.has(normPath(p)) && !routes.has(normPath(p + '/'))); if (missing.length) fail('sitemap-404', `${missing.length} sitemap URL(s) have no file in the output`, missing.slice(0, 8).join('\n'));
+    const missing = paths.filter((p) => !routes.has(normPath(p)) && !routes.has(normPath(p + '/')) && !routes.has(normPath(p.replace(/\.html?$/i, '')))); if (missing.length) fail('sitemap-404', `${missing.length} sitemap URL(s) have no file in the output`, missing.slice(0, 8).join('\n'));
     if (opt.base) { const foreign = smUrls.filter((x) => { try { return new URL(x.loc).origin !== opt.base; } catch { return true; } }); if (foreign.length) fail('sitemap-host', `${foreign.length} sitemap URL(s) not on ${opt.base}, e.g. ${foreign[0].loc}`); }
     const badMod = smUrls.filter((x) => x.lastmod && isNaN(Date.parse(x.lastmod))); if (badMod.length) warn('sitemap-lastmod', `${badMod.length} invalid <lastmod>`);
     const sameMod = new Set(smUrls.map((x) => x.lastmod).filter(Boolean)); if (smUrls.length > 5 && sameMod.size === 1) warn('sitemap-lastmod', `every URL has the same <lastmod> — a build timestamp, not a content date`);
     const blocked = paths.filter((p) => !robotsAllows(groups, p)); if (blocked.length) fail('sitemap-robots', `${blocked.length} sitemap URL(s) blocked by robots.txt, e.g. ${blocked[0]}`);
     const slashes = paths.filter((p) => p !== '/' && !/\.[a-z0-9]{2,5}$/i.test(p)); const withSlash = slashes.filter((p) => p.endsWith('/')).length; if (slashes.length && withSlash && withSlash !== slashes.length) warn('sitemap-slash', `sitemap mixes trailing-slash styles (${withSlash} with, ${slashes.length - withSlash} without)`);
-    for (const p of paths) ctx.sitemapUrls.add(normPath(p));
+    for (const p of paths) ctx.sitemapUrls.add(normPath(p.replace(/\.html?$/i, '')));
     const gap = [];
     for (const [r, f] of routes) if (!ctx.sitemapUrls.has(r) && !/\/404$|\/404\.html$/.test(r) && !INDEX_NOINDEX_RE.test(r) && !hidden.has(r)) gap.push(r || '/');
     if (gap.length) warn('sitemap-gap', `${gap.length} indexable HTML route(s) not in the sitemap`, gap.slice(0, 8).join('\n'));
@@ -616,8 +644,8 @@ function distScan(dir) {
       if (!a.href || /^(#|mailto:|tel:|javascript:|https?:)/i.test(a.href) && !(opt.base && a.href.startsWith(opt.base))) continue;
       let p = a.href.startsWith(opt.base || '\u0000') ? a.href.slice(opt.base.length) : a.href; p = p.split('#')[0].split('?')[0]; if (!p) continue;
       if (!p.startsWith('/')) { try { p = new URL(p, 'https://x' + (routeOf(f))).pathname; } catch { continue; } }
-      linkedSet.add(normPath(p));
-      const exists = routes.has(normPath(p)) || files.some((ff) => rel(ff) === p) || files.some((ff) => rel(ff) === p.replace(/\/$/, '') + '.html');
+      linkedSet.add(normPath(p.replace(/\.html?$/i, '')));
+      const exists = routes.has(normPath(p)) || routes.has(normPath(p.replace(/\.html?$/i, ''))) || files.some((ff) => rel(ff) === p) || files.some((ff) => rel(ff) === p.replace(/\/$/, '') + '.html');
       if (!exists) brokenInternal.push(`${r || '/'} → ${p}`);
     }
   }
@@ -670,33 +698,56 @@ if (isDir) distScan(target); else await liveScan(target);
     results.length = 0; results.push(...out);
   }
 }
+// ── severity tiers: what a finding costs, not just whether it is wrong
+//   INVISIBLE — the site or the page cannot enter the index (or tells the engine another URL is the real one)
+//   DILUTED   — it can be indexed, but its signals are split, contradictory or lost
+//   DEGRADED  — it is indexed as it is, but shown worse than it could be
+const INVISIBLE = new Set(['fetch', 'status', 'robots', 'x-robots', 'noindex', 'canonical-file', 'canonical-redirect', 'hreflang-file', 'sitemap-robots', 'inner', 'sitemap-404', 'sitemap-host']);
+const DILUTED = new Set(['alias', 'https', 'canonical', 'canonical-slash', 'canonical-html', 'title-dup', 'description-dup', 'hreflang', 'hreflang-recip', 'lang', 'lang-script', 'h1', 'h-empty', 'slash', 'sitemap', 'sitemap-slash', 'sitemap-scheme', 'sitemap-gap', 'inner-redirect', 'broken', 'orphan', 'nofollow', 'nofollow-meta', 'mixed', 'jsonld-syntax', 'jsonld-context', 'jsonld-h1', 'jsonld-article', 'jsonld-legal', 'terms-link', 'og-url', 'thin']);
+const tierOf = (r) => (r.level === 'pass' || r.level === 'info') ? '' : INVISIBLE.has(r.id) && !(r.id === 'noindex' && r.level === 'warn' && !/sitemap/.test(r.msg)) ? 'INVISIBLE' : DILUTED.has(r.id) ? 'DILUTED' : 'DEGRADED';
+for (const r of results) r.tier = tierOf(r);
+const tiers = { INVISIBLE: 0, DILUTED: 0, DEGRADED: 0 }; for (const r of results) if (r.tier) tiers[r.tier]++;
 const counts = { pass: 0, warn: 0, fail: 0, info: 0 };
 for (const r of results) counts[r.level]++;
 const failed = counts.fail > 0 || (opt.strict && counts.warn > 0);
 const mode = isDir ? 'build output' : 'live';
-const verdict = failed ? `SIGHT OBSCURED — fix the ✖ items, then ${isDir ? 'scan the live site' : 'run again against the live site'}.` : isDir ? 'SIGHT CLEAR — build output consistent. Next: scan the live site.' : 'SIGHT CLEAR — no failures. Re-run after deploy; Search Console is the only verdict that counts.';
+const verdict = tiers.INVISIBLE ? `SIGHT OBSCURED — ${tiers.INVISIBLE} finding(s) keep pages out of the index. A site that cannot be found is as lost as one that was broken into; fix these first.`
+  : failed ? `SIGHT OBSCURED — fix the ✖ items, then ${isDir ? 'scan the live site' : 'run again against the live site'}.`
+  : isDir ? 'SIGHT CLEAR — build output consistent. Next: scan the live site.' : 'SIGHT CLEAR — no failures. Re-run after deploy; Search Console is the only verdict that counts.';
+const tierLine = `INVISIBLE ${tiers.INVISIBLE} · DILUTED ${tiers.DILUTED} · DEGRADED ${tiers.DEGRADED}`;
+const kekkaiCmd = `npx github:kappa-yashi/kekkai ${isDir ? target : target}`;
 const plainMark = { pass: '✔', warn: '!', fail: '✖', info: '·' };
 function render(fmt, color) {
   const c = (code, s) => (color ? `\x1b[${code}m${s}\x1b[0m` : s);
   const mark = { pass: c(32, '✔'), warn: c(33, '!'), fail: c(31, '✖'), info: c(90, '·') };
-  const shown = opt.summary ? results.filter((r) => r.level === 'fail' || r.level === 'warn') : results;
+  const ORDER = { INVISIBLE: 0, DILUTED: 1, DEGRADED: 2, '': 3 };
+  const shown = opt.summary ? results.filter((r) => r.level === 'fail' || r.level === 'warn').sort((a, b) => ORDER[a.tier] - ORDER[b.tier]) : results;
+  const invisible = results.filter((r) => r.tier === 'INVISIBLE');
+  const tag = (r) => (r.tier === 'INVISIBLE' ? 'INVISIBLE ' : '');
   const lines = [];
   if (fmt === 'md') {
-    lines.push(`# senrigan (千里眼) — ${mode} scan of ${target}`, '', `**${counts.pass} pass · ${counts.warn} warn · ${counts.fail} fail · ${counts.info} info** — ${verdict}`, '');
-    let last = ''; for (const r of shown) { if (r.section !== last) { lines.push('', `## ${r.section}`, ''); last = r.section; } lines.push(`- ${plainMark[r.level]} ${r.msg}${r.detail && r.level !== 'pass' ? `\n  \`${String(r.detail).replace(/\n/g, ' · ')}\`` : ''}`); }
+    lines.push(`# senrigan (千里眼) — ${mode} scan of ${target}`, '', `**${tierLine}** · ${counts.pass} pass · ${counts.warn} warn · ${counts.fail} fail · ${counts.info} info`, '', `> ${verdict}`, '');
+    if (invisible.length && !opt.summary) { lines.push('## Out of the index — fix first', ''); for (const r of invisible) lines.push(`- ${plainMark[r.level]} ${r.msg}`); lines.push(''); }
+    let last = ''; for (const r of shown) { if (r.section !== last) { lines.push('', `## ${r.section}`, ''); last = r.section; } lines.push(`- ${plainMark[r.level]} ${opt.summary && r.tier ? `**${r.tier}** ` : tag(r) ? '**INVISIBLE** ' : ''}${r.msg}${r.detail && r.level !== 'pass' ? `\n  \`${String(r.detail).replace(/\n/g, ' · ')}\`` : ''}`); }
+    if (ctx.kekkai.length) lines.push('', '## Hand-off to kekkai (結界)', '', ...ctx.kekkai.map((k) => `- ${k}`), '', `Visibility and security are one boundary: \`${kekkaiCmd}\``);
+    else lines.push('', `Visibility is half of it — check the security boundary too: \`${kekkaiCmd}\``);
     return lines.join('\n') + '\n';
   }
-  lines.push('', `senrigan (千里眼) — ${mode} scan of ${target}`, '');
+  lines.push('', `senrigan (千里眼) — ${mode} scan of ${target}`, '', `  ${c(tiers.INVISIBLE ? 31 : 90, `INVISIBLE ${tiers.INVISIBLE}`)} · ${c(tiers.DILUTED ? 33 : 90, `DILUTED ${tiers.DILUTED}`)} · ${c(90, `DEGRADED ${tiers.DEGRADED}`)}`, '');
+  if (invisible.length && !opt.summary) { lines.push(c(1, '  Out of the index — fix first')); for (const r of invisible) lines.push(`    ${mark[r.level]} ${r.msg}`); lines.push(''); }
   let last = '';
   for (const r of shown) {
     if (!opt.summary && r.section !== last) { lines.push(c(1, `  ${r.section}`)); last = r.section; }
-    lines.push(`    ${mark[r.level]} ${opt.summary ? `[${r.section}] ` : ''}${r.msg}`);
+    const t = opt.summary && r.tier ? c(r.tier === 'INVISIBLE' ? 31 : r.tier === 'DILUTED' ? 33 : 90, `${r.tier.padEnd(9)} `) : tag(r) ? c(31, 'INVISIBLE ') : '';
+    lines.push(`    ${mark[r.level]} ${t}${opt.summary ? `[${r.section}] ` : ''}${r.msg}`);
     if (!opt.summary && r.detail && r.level !== 'pass') for (const l of String(r.detail).split('\n')) lines.push(c(90, `        ${l}`));
   }
-  lines.push('', `  ${c(32, counts.pass + ' pass')}  ${c(33, counts.warn + ' warn')}  ${c(31, counts.fail + ' fail')}  ${c(90, counts.info + ' info')}`, '', `  ${c(failed ? 31 : 32, verdict)}`, '');
+  lines.push('', `  ${c(32, counts.pass + ' pass')}  ${c(33, counts.warn + ' warn')}  ${c(31, counts.fail + ' fail')}  ${c(90, counts.info + ' info')}   ${tierLine}`, '', `  ${c(failed ? 31 : 32, verdict)}`, '');
+  if (ctx.kekkai.length) { lines.push(c(1, '  Hand-off to kekkai (結界)')); for (const k of ctx.kekkai) lines.push(`    → ${k}`); lines.push(`    Visibility and security are one boundary: ${kekkaiCmd}`, ''); }
+  else lines.push(c(90, `  Visibility is half of it — check the security boundary too: ${kekkaiCmd}`), '');
   return lines.join('\n');
 }
-const jsonOut = () => JSON.stringify({ target, mode: isDir ? 'dist' : 'live', counts, ok: !failed, results }, null, 2);
+const jsonOut = () => JSON.stringify({ target, mode: isDir ? 'dist' : 'live', counts, tiers, ok: !failed, kekkai: ctx.kekkai, results }, null, 2);
 if (opt.json) console.log(jsonOut()); else console.log(render('text', process.stdout.isTTY));
 if (opt.out) { const { writeFileSync } = await import('node:fs'); writeFileSync(opt.out, opt.out.endsWith('.json') ? jsonOut() : opt.out.endsWith('.md') ? render('md', false) : render('text', false)); console.error(`report written to ${opt.out}`); }
 process.exit(failed ? 1 : 0);

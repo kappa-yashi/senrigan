@@ -32,6 +32,8 @@ help from the rest of the site.
   site, pointing at the page itself — including the trailing-slash form you
   chose. Translated pages are not duplicates: each canonical points at its
   own language version, and hreflang does the linking.
+- `www` as the primary host; the apex 301s to it. (Neutral for search;
+  better for cookies and CDNs — kekkai checks the redirect and HSTS.)
 - A trailing-slash policy, chosen once, applied everywhere: canonicals,
   sitemap, internal links, redirects. Mixed styles cost a redirect hop per
   link and split signals between two URLs.
@@ -105,9 +107,16 @@ help from the rest of the site.
   `article`), `og:locale`; `twitter:card` (`summary_large_image` when there
   is an image).
 
+- Legal pages of a product or a service (terms, licence, privacy) carry a
+  WebPage node in the same `@graph` (isPartOf the WebSite, about the
+  product), and the product points back: `license` on a
+  `SoftwareApplication`, `termsOfService` on a `Service`.
+
 ## DON'T
 
-- No second `<h1>` from the content, the sidebar, the footer or a widget.
+- No second `<h1>` from the content, the sidebar, the footer or a widget —
+  and no `role="heading" aria-level="1"` to hide one from a counter.
+- No canonical with `.html` on a host that serves clean URLs.
 - No heading used as a label for UI chrome ("saved", "share", "menu") —
   use a `<p>`, a `<span>` or `aria-label`.
 - No canonical to the home page from every inner page, no relative

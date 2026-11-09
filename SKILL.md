@@ -58,7 +58,12 @@ description — rather than dropping the check.
    `https://github.com/kappa-yashi/senrigan` (`bin/senrigan.mjs`, zero
    dependencies) or run `npx github:kappa-yashi/senrigan <target>`.
 
-2. **Read the report top to bottom.** `✖` is a failure, `!` a weakness worth
+2. **Read the report by tier, then top to bottom.** The first line counts
+   **INVISIBLE / DILUTED / DEGRADED**; the "Out of the index — fix first"
+   block lists the INVISIBLE findings. Present them to the user as what they
+   are: pages search engines and language models cannot see. Do not describe
+   the report as "polish" or "nice to have" because security looked worse —
+   an invisible site is a failed site. `✖` is a failure, `!` a weakness worth
    a decision, `·` a fact. Exit code 1 means sight is obscured. In `dist/`
    mode repeated failures are grouped (`248 more page(s): no canonical`):
    one template is wrong, not 248 pages — fix the template.
@@ -78,7 +83,13 @@ description — rather than dropping the check.
    8. semantic pass per important page, by hand, with `--semantic` as a hint
       (PART 8)
 
-4. **Verify against the live response, then against Search Console.** After
+4. **Hand the transport to kekkai.** If the report ends with a "Hand-off to
+   kekkai" block (http, two hosts, mixed content, apex as primary host), run
+   kekkai on the same target, or tell the user to. Recommend `www` as the
+   primary host: neutral for search, but it isolates cookies from subdomains
+   and keeps a plain CNAME for any CDN.
+
+5. **Verify against the live response, then against Search Console.** After
    deploy, run the live scan again; then request indexing for the changed
    URLs and read the coverage report a few days later. The scanner says
    what the page tells the crawler; Search Console says what the crawler did
@@ -88,6 +99,10 @@ description — rather than dropping the check.
 
 | finding | what it means | fix |
 |---|---|---|
+| INVISIBLE count > 0 | pages are out of the index right now | fix these before any other finding, then re-run live |
+| dist: canonical keeps `.html` | clean-URL hosts redirect it | canonical, sitemap and links without the extension; confirm live |
+| two `<h1>` incl. `role="heading"` | the second language was hidden from the counter, not from the outline | one language per route (`/`, `/el/`) with hreflang |
+| legal page without JSON-LD on a product/service site | the terms are part of what is offered, and the graph does not show it | WebPage node (isPartOf WebSite, about the product); `license` on software, `termsOfService` on a Service |
 | canonical points at a file | an image URL was pasted into the canonical / alternate field | the canonical is the page's own URL; the image goes in og:image |
 | canonical is a URL that redirects here | `/human` declared, `/human/` served (or `.html` vs clean URL) — the canonical never answers 200 | align canonical, sitemap and links with what the host actually serves |
 | `lang` disagrees with the title's script | language declared wrong, or a title copied across languages | lang from the route; translate the title |

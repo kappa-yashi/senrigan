@@ -22,6 +22,14 @@ and answers three questions from the `<head>` and the heading skeleton:
 3. **What is it about?** (title, description, `<h1>`, headings, alt text,
    structured data)
 
+**Visibility is not decoration.** A site nobody can find fails as
+completely as one that was broken into; the breach announces itself, the
+invisibility never does. The scanner therefore ranks findings by cost —
+INVISIBLE (out of the index), DILUTED (indexed with split or contradictory
+signals), DEGRADED (indexed, shown worse than it could be) — and the first
+tier is not optional on any site that wants to be read by people, search
+engines or language models.
+
 Rendering with JavaScript happens later, in a separate queue, sometimes days
 later, sometimes never for a low-priority site. A static site has no excuse:
 everything the page is must be in the served HTML.
@@ -35,7 +43,11 @@ eight parts below.
 
 Every page has exactly one address. Everything else is a redirect to it.
 
-**Host.** Pick apex or `www`. The other 301s to it. Both certificates valid.
+**Host.** Make `www` the primary host and 301 the apex to it. Search engines
+do not prefer either, but `www` keeps cookies off every other subdomain and
+can be a plain CNAME, so any CDN, failover or host change is a DNS edit
+rather than an apex-flattening workaround. Whichever you pick, the other
+answers with a 301 — two hosts that both answer 200 split every signal. Both certificates valid.
 `http://` 301s to `https://`. (kekkai checks the redirects and HSTS;
 senrigan checks that the canonicals agree with the choice.)
 

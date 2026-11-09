@@ -1,5 +1,3 @@
-<img width="2048" height="1143" alt="Senrigan 千里眼-emblem-git-readme" src="https://github.com/user-attachments/assets/93277701-43e3-46ae-b23e-2ee0c485a374" />
-
 # senrigan (千里眼)
 
 Static site visibility & structure check.
@@ -11,6 +9,27 @@ question: **what does this site fail to tell the machines?** It scans a
 **live URL** or a **build folder** and reports what search engines, social
 scrapers and AI crawlers actually see: the head, the heading skeleton, the
 link topology, the sitemap, the structured data.
+
+**Why it is not "just cleanup".** A site nobody can find is as lost as a
+site that was broken into — the difference is that a breach announces
+itself, and invisibility never does. A canonical pasted with an image URL, a
+`noindex` left on the home page, two hosts answering the same content, a
+canonical that redirects: each of these removes pages from search engines and
+from the language models that read them, silently, for months. senrigan ranks
+its findings by that cost:
+
+- **INVISIBLE** — the page cannot enter the index, or tells the engine that
+  another URL is the real one. Fix before anything else.
+- **DILUTED** — it can be indexed, but its signals are split or contradictory
+  (duplicate titles, slash mismatches, broken hreflang, orphans, missing
+  canonicals, structured data that disagrees with the page).
+- **DEGRADED** — it is indexed as it is, but shown worse than it could be
+  (lengths, alt text, dimensions, social cards).
+
+Visibility and security are one boundary. Where a finding belongs to the
+transport or the infrastructure (http, two hosts, mixed content, the apex as
+primary host), senrigan hands it to [kekkai](https://github.com/kappa-yashi/kekkai)
+by name and ends every report with the kekkai command for the same target.
 
 One file, zero dependencies, Node 18+. Reference stack: Astro, built to static
 files. The checks are framework-agnostic.
@@ -97,7 +116,14 @@ or clone and run `node bin/senrigan.mjs <target>`.
 
 - a page that looks like an article (blog path, or a single `<article>` with
   a `<time>`) but carries no `Article`/`BlogPosting` type
-- legal pages (privacy, terms, cookies…) without JSON-LD are noted, not warned
+- legal pages (privacy, terms, cookies…) without JSON-LD: a warning when the
+  site describes a product or a service (`SoftwareApplication`, `Product`,
+  `Service`, `MedicalClinic`…) — the terms and the privacy policy are part of
+  what is offered — and a note on a plain blog or portfolio; the entity is
+  checked for the property schema.org gives it for the purpose (`license` on
+  software, `termsOfService` on a `Service`)
+- an ARIA heading (`<div role="heading" aria-level="1">`) counts as the
+  heading it declares — two languages stacked on one page still have two `<h1>`
 - JSON-LD parses; `@context` present; types listed; required fields per type
   (`Article`/`BlogPosting`: headline, datePublished, author, image;
   `Organization`/`Person`/`WebSite`: name, url; `BreadcrumbList`: positions,
@@ -140,7 +166,13 @@ pointing at that platform's setting — `[Webflow: Site settings → SEO →
 --dist              force dist mode for a folder
 ```
 
-Exit code 0 = sight clear, 1 = sight obscured, 2 = usage.
+Exit code 0 = sight clear, 1 = sight obscured, 2 = usage. `--summary` sorts
+by tier; `--json` carries `tiers` and the `kekkai` hand-offs.
+
+In `dist/` mode `page.html` is matched to `/page` the way hosts with clean
+URLs serve it (Cloudflare Pages, Netlify, Vercel), so a sitemap that lists
+`/gallery` is not reported as missing; a canonical that keeps `.html` is
+reported, because those hosts answer it with a redirect.
 
 In `dist/` mode every HTML file is scanned; the first N are reported in
 full and the rest contribute only failures, grouped (one line per kind with
