@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/senrigan-emblem.jpg" alt="senrigan emblem: a mechanical eye with a camera-aperture iris inside a red and cream hexagonal frame, the kanji 千里眼 above it, SYS 02" width="760"></p>
+
 # senrigan (千里眼)
 
 Static site visibility & structure check.
