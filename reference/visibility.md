@@ -357,6 +357,34 @@ would have brought them. No tool does that for you.
 
 ---
 
+## PART 9 — Markup is how machines read
+
+No engine penalises a `<div>`. What costs visibility is markup that hides the
+shape of the page:
+
+- **Content vs chrome.** Language models, RAG pipelines, reader modes and
+  snippet extraction look for `<main>`, `<article>`, headings and text blocks
+  to decide what the page says. Text loose in nested divs, with the menu,
+  the cookie banner and the footer at the same depth, is a page whose
+  content has to be guessed.
+- **Links that are not links.** A `<div onclick>` menu works for a mouse and
+  does nothing for a crawler: no `href`, nothing to follow. The pages behind
+  it are found only through the sitemap, if at all.
+- **Render cost.** Every wrapper is a node to lay out. Page builders emit
+  six to eight wrappers per widget; a 300-word page with 3 000 nodes pays for
+  it in INP and LCP, which are ranking signals.
+
+What the grade looks at, and what to do on a page builder:
+
+| measure | healthy | builder fix |
+|---|---|---|
+| landmarks | one `main`, a `nav`, header, footer | set the container's HTML tag (Elementor: Container → HTML Tag) |
+| wrapper chains | none ≥ 4 | flex containers instead of nested sections/columns; remove empty wrappers |
+| nodes per word | < 3 | fewer widgets per text block; one text widget instead of five headings |
+| loose text | < 50 % | text widgets that output `p`, not `div` |
+| click targets | all `<a href>` | link fields, never "on click" actions for navigation |
+| form fields | each with a label | enable visible labels or set `aria-label` |
+
 ## Checklist before a release
 
 - [ ] `senrigan ./dist --base https://host` — sight clear

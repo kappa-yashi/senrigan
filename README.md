@@ -143,6 +143,37 @@ or clone and run `node bin/senrigan.mjs <target>`.
   five terms are compared with the title and the `<h1>`. Zero overlap is
   reported as a possible intent mismatch. Listing pages are skipped.
 
+**Layer 6 — markup & accessibility** (every scanned page, graded)
+
+Search engines do not penalise `<div>` as such. Markup costs visibility in
+three ways, and the grade measures those: content machines cannot separate
+from chrome (language models, RAG pipelines, reader modes and snippet
+extraction lean on landmarks and text blocks), navigation crawlers cannot
+follow (a `<div onclick>` is not a link), and render cost (Core Web Vitals).
+
+- landmarks: one `<main>`, a `<nav>`, header / footer, skip link
+- **wrapper chains**: div/span holding a single div/span, nested — page
+  builders emit 6–8 per widget
+- **nodes per word** of visible text, and the share of text sitting loose in
+  div/span instead of `p`, `li`, headings, links
+- inline styles, classes per element, the page builder behind it (Elementor,
+  Divi, WPBakery, Oxygen, Bricks, Beaver Builder, Webflow, Wix, Framer,
+  Squarespace)
+- accessibility that can be checked without rendering: form fields without a
+  label (a placeholder is not one), buttons without a name, duplicate `id`,
+  `tabindex` > 0, focusable elements inside `aria-hidden`, iframes without
+  `title`, autoplaying video with sound, invalid ARIA roles
+- **click targets that are not links** (`div`/`span` with `onclick`,
+  `role="link"` without `href`, `javascript:` links)
+
+Each page gets **GREEN** (≥ 80), **YELLOW** (50–79) or **RED** (< 50) with its
+three heaviest reasons; the site gets the median, shown next to the tiers in
+the header. The grade is reported beside the verdict, not inside it — with
+one exception: navigation items that are click handlers make the page RED and
+are a failure (DILUTED), because the pages behind them can only be found
+through the sitemap. Contrast and focus order need a rendering browser and
+are out of scope.
+
 **Site-wide collapse and platform hints**
 
 A finding that repeats on most scanned pages is one finding about the

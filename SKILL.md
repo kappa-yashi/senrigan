@@ -99,6 +99,9 @@ description — rather than dropping the check.
 
 | finding | what it means | fix |
 |---|---|---|
+| MARKUP RED / YELLOW | machines cannot tell content from chrome, or the page costs too much to render | landmarks (`main`, `nav`), text in `p`/`li`/headings, flatten wrapper chains; on page builders, use their semantic widgets and HTML-tag settings |
+| navigation items are click handlers | crawlers cannot follow the menu | real `<a href>` for every destination; JavaScript may enhance, never replace, the link |
+| form field without a label | placeholder text is not a label | `<label for>` or `aria-label` |
 | INVISIBLE count > 0 | pages are out of the index right now | fix these before any other finding, then re-run live |
 | dist: canonical keeps `.html` | clean-URL hosts redirect it | canonical, sitemap and links without the extension; confirm live |
 | two `<h1>` incl. `role="heading"` | the second language was hidden from the counter, not from the outline | one language per route (`/`, `/el/`) with hreflang |

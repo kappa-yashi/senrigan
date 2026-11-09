@@ -141,11 +141,91 @@ function inspect(html) {
   if (/\/wp-content\//.test(html)) o.assetHosts.add('wp-content'); if (/\/_astro\//.test(html)) o.assetHosts.add('_astro'); if (/\/_next\//.test(html)) o.assetHosts.add('_next');
   const noChrome = (mainM ? mainM[1] : clean).replace(/<(nav|header|footer|aside|form)\b[\s\S]*?<\/\1>/gi, '');
   o.mainText = stripTags(noChrome); o.text = stripTags(clean);
+  o.markup = analyzeMarkup(clean, html.length, o.text);
   return o;
 }
 
+// ───────────────────────────── Layer 6: markup & accessibility ─────────────────────────────
+// Divs are not penalised by search engines as such. What costs visibility is (1) content that machines cannot
+// separate from chrome — LLMs, RAG pipelines, reader modes and snippet extraction lean on landmarks and text
+// blocks; (2) navigation that crawlers cannot follow (a div with onclick is not a link); (3) render cost (CWV).
+// The grade measures those three, plus the accessibility checks that can be made without rendering.
+const ARIA_ROLES = new Set('alert alertdialog application article banner blockquote button caption cell checkbox code columnheader combobox complementary contentinfo definition deletion dialog directory document emphasis feed figure form generic grid gridcell group heading img image insertion link list listbox listitem log main marquee math menu menubar menuitem menuitemcheckbox menuitemradio meter navigation none note option paragraph presentation progressbar radio radiogroup region row rowgroup rowheader scrollbar search searchbox separator slider spinbutton status strong subscript superscript switch tab table tablist tabpanel term textbox time timer toolbar tooltip tree treegrid treeitem'.split(' '));
+const TEXT_BLOCKS = new Set(['p', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'td', 'th', 'dd', 'dt', 'blockquote', 'figcaption', 'caption', 'label', 'button', 'a', 'pre', 'code', 'summary', 'legend', 'q', 'cite', 'time', 'address', 'option', 'small', 'strong', 'em', 'b', 'i', 'mark', 'abbr']);
+const BUILDERS = [['Elementor', /\belementor-/], ['Divi', /\bet_pb_/], ['WPBakery', /\b(?:vc_row|wpb_)/], ['Oxygen', /\b(?:ct-section|oxy-)/], ['Bricks', /\bbrxe-/], ['Beaver Builder', /\bfl-(?:row|col|module)/], ['Webflow', /\bw-(?:layout|nav|container|richtext)/], ['Wix', /\b(?:wixui-|comp-[a-z0-9]{6,})/], ['Framer', /\bframer-/], ['Squarespace', /\bsqs-/]];
+function analyzeMarkup(clean, htmlLen, text) {
+  // a tolerant tree: enough to see who wraps whom
+  const root = { tag: '#root', attrs: '', kids: [], text: 0, parent: null }; let cur = root; const all = [];
+  for (const m of clean.matchAll(/<(\/?)([a-zA-Z][\w:-]*)\b([^>]*?)(\/?)>|([^<]+)/g)) {
+    if (m[5] !== undefined) { const t = m[5].replace(/&[a-z#0-9]+;/gi, ' ').trim(); if (t) { cur.text += t.length; (cur.textRuns ||= []).push(t.length); } continue; }
+    const name = m[2].toLowerCase();
+    if (m[1]) { let n = cur; while (n && n.tag !== name) n = n.parent; if (n && n.parent) cur = n.parent; continue; }
+    if (['p', 'li', 'td', 'th', 'tr', 'option', 'dt', 'dd'].includes(name) && cur.tag === name && cur.parent) cur = cur.parent;
+    const node = { tag: name, attrs: m[3] || '', kids: [], text: 0, parent: cur }; cur.kids.push(node); all.push(node);
+    if (!VOID.has(name) && m[4] !== '/') cur = node;
+  }
+  const words = (text.match(/[\p{L}\p{N}]+/gu) || []).length || 1;
+  const has = (t) => all.filter((n) => n.tag === t || new RegExp(`\\brole\\s*=\\s*["']${{ main: 'main', nav: 'navigation', header: 'banner', footer: 'contentinfo' }[t]}["']`, 'i').test(n.attrs)).length;
+  const mains = has('main'), navs = has('nav'), headers = has('header'), footers = has('footer');
+  // wrapper chains: div/span holding exactly one element child and no text of its own, nested
+  const isWrap = (n) => (n.tag === 'div' || n.tag === 'span') && n.kids.length === 1 && !n.text && (n.kids[0].tag === 'div' || n.kids[0].tag === 'span');
+  let chains = 0, longest = 0;
+  for (const n of all) { if (!isWrap(n) || (n.parent && isWrap(n.parent))) continue; let len = 1, k = n; while (isWrap(k)) { k = k.kids[0]; len++; } if (len >= 4) { chains++; longest = Math.max(longest, len); } }
+  // text that sits loose in div/span instead of a text block (p, li, h*, a, button…)
+  let loose = 0, held = 0;
+  for (const n of [root, ...all]) { if (!n.text) continue; let a = n, sem = false; while (a && a.tag !== '#root') { if (TEXT_BLOCKS.has(a.tag)) { sem = true; break; } if (!['div', 'span', 'section', 'article', 'main', 'aside', 'header', 'footer', 'nav', 'font', 'center'].includes(a.tag)) { sem = true; break; } if (a.tag !== 'div' && a.tag !== 'span') break; a = a.parent; } if (sem) held += n.text; else loose += n.text; }
+  const looseShare = loose / Math.max(1, loose + held);
+  const classes = all.map((n) => (attr(n.attrs, 'class') || '').split(/\s+/).filter(Boolean).length); const avgClasses = classes.reduce((x, y) => x + y, 0) / Math.max(1, classes.length);
+  const inlineStyles = all.filter((n) => attr(n.attrs, 'style')).length;
+  const builder = (BUILDERS.find(([, re]) => re.test(clean)) || [])[0] || '';
+  // accessibility, static
+  const ids = new Map(); for (const n of all) { const id = attr(n.attrs, 'id'); if (id) ids.set(id, (ids.get(id) || 0) + 1); }
+  const dupIds = [...ids.entries()].filter(([, c]) => c > 1).map(([id]) => id);
+  const labelFor = new Set(all.filter((n) => n.tag === 'label').map((n) => attr(n.attrs, 'for')).filter(Boolean));
+  const inLabel = (n) => { let a = n.parent; while (a) { if (a.tag === 'label') return true; a = a.parent; } return false; };
+  const named = (n) => attr(n.attrs, 'aria-label') || attr(n.attrs, 'aria-labelledby') || attr(n.attrs, 'title');
+  const fields = all.filter((n) => (n.tag === 'input' && !/^(hidden|submit|button|image|reset)$/i.test(attr(n.attrs, 'type') || '')) || n.tag === 'select' || n.tag === 'textarea');
+  const unlabeled = fields.filter((n) => !named(n) && !(attr(n.attrs, 'id') && labelFor.has(attr(n.attrs, 'id'))) && !inLabel(n)).length;
+  const textOf = (n) => n.text + n.kids.reduce((x, k) => x + textOf(k) + (k.tag === 'img' && attr(k.attrs, 'alt') ? 1 : 0), 0);
+  const nameless = all.filter((n) => (n.tag === 'button' && !named(n) && !textOf(n)) || (n.tag === 'input' && /^(submit|button|reset)$/i.test(attr(n.attrs, 'type') || '') && !attr(n.attrs, 'value') && !named(n))).length;
+  const posTab = all.filter((n) => Number(attr(n.attrs, 'tabindex')) > 0).length;
+  const focusable = (n) => (n.tag === 'a' && attr(n.attrs, 'href') != null) || ['button', 'input', 'select', 'textarea'].includes(n.tag) || (attr(n.attrs, 'tabindex') != null && Number(attr(n.attrs, 'tabindex')) >= 0);
+  const hiddenFocus = all.filter((n) => /aria-hidden\s*=\s*["']?true/i.test(n.attrs) && focusable(n)).length;
+  const iframesNoTitle = all.filter((n) => n.tag === 'iframe' && !attr(n.attrs, 'title')).length;
+  const autoplay = all.filter((n) => n.tag === 'video' && attr(n.attrs, 'autoplay') != null && attr(n.attrs, 'muted') == null).length;
+  const badRoles = [...new Set(all.map((n) => (attr(n.attrs, 'role') || '').split(/\s+/)[0]).filter((r) => r && !ARIA_ROLES.has(r) && !/^(doc|graphics)-/.test(r)))];
+  // controls crawlers cannot follow
+  // navigation: <nav>/<header>/role=navigation, or what page builders call it in class and id (menu, nav, header)
+  const inNav = (n) => { let a = n.parent; while (a) { if (a.tag === 'nav' || a.tag === 'header' || /role\s*=\s*["']navigation/i.test(a.attrs) || /\b(?:class|id)\s*=\s*["'][^"']*\b[\w-]*(?:menu|navbar|nav|header)[\w-]*\b/i.test(a.attrs)) return true; a = a.parent; } return false; };
+  const fake = all.filter((n) => (!['a', 'button', 'input', 'select', 'textarea', 'summary', 'label', 'form', 'body'].includes(n.tag) && (/\bonclick\s*=/i.test(n.attrs) || /role\s*=\s*["']link/i.test(n.attrs))) || (n.tag === 'a' && (attr(n.attrs, 'href') == null || /^javascript:/i.test(attr(n.attrs, 'href') || '')) && (/\bonclick\s*=/i.test(n.attrs) || textOf(n))));
+  const fakeNav = fake.filter(inNav).length;
+  const skip = (() => { const a = all.find((n) => n.tag === 'a' && attr(n.attrs, 'href') != null); return !!a && /^#/.test(attr(a.attrs, 'href')); })();
+  // score
+  const pen = []; const P = (pts, why) => { if (pts > 0) pen.push([pts, why]); };
+  if (!mains) P(10, 'no <main>'); else if (mains > 1) P(5, `${mains} <main>`);
+  if (!navs && all.filter((n) => n.tag === 'a').length >= 5) P(5, 'no <nav>');
+  P(Math.min(25, chains * 2) + (longest >= 8 ? 5 : 0), chains ? `${chains} wrapper chain${chains > 1 ? 's' : ''} (longest ${longest})` : '');
+  const npw = all.length / words; P(npw > 10 ? 30 : npw > 6 ? 20 : npw > 3 ? 10 : 0, `${npw.toFixed(1)} nodes per word`);
+  P(looseShare > 0.75 ? 15 : looseShare > 0.5 ? 10 : 0, `${Math.round(looseShare * 100)}% of the text loose in div/span`);
+  P(inlineStyles > 50 ? 5 : 0, `${inlineStyles} inline styles`);
+  P(avgClasses > 4 ? 5 : 0, `${avgClasses.toFixed(1)} classes per element`);
+  P(Math.min(15, unlabeled * 5), unlabeled ? `${unlabeled} form field${unlabeled > 1 ? 's' : ''} without a label` : '');
+  P(Math.min(10, nameless * 5), nameless ? `${nameless} button${nameless > 1 ? 's' : ''} without a name` : '');
+  P(dupIds.length ? 5 : 0, `${dupIds.length} duplicate id${dupIds.length > 1 ? 's' : ''}`);
+  P(posTab ? 5 : 0, `${posTab} tabindex > 0`);
+  P(hiddenFocus ? 5 : 0, `${hiddenFocus} focusable element${hiddenFocus > 1 ? 's' : ''} inside aria-hidden`);
+  P(iframesNoTitle ? 3 : 0, `${iframesNoTitle} iframe${iframesNoTitle > 1 ? 's' : ''} without title`);
+  P(autoplay ? 3 : 0, `${autoplay} autoplaying video${autoplay > 1 ? 's' : ''} with sound`);
+  P(badRoles.length ? 3 : 0, `invalid role${badRoles.length > 1 ? 's' : ''}: ${badRoles.slice(0, 3).join(', ')}`);
+  P(Math.min(30, fake.length * 15), fake.length ? `${fake.length} click target${fake.length > 1 ? 's' : ''} that are not links${fakeNav ? ` (${fakeNav} in the navigation)` : ''}` : '');
+  const score = Math.max(0, 100 - pen.reduce((x, [p]) => x + p, 0));
+  const flag = fakeNav || score < 50 ? 'RED' : score < 80 ? 'YELLOW' : 'GREEN';
+  pen.sort((a, b) => b[0] - a[0]);
+  return { score, flag, reasons: pen.map(([, w]) => w), nodes: all.length, words, npw, chains, longest, looseShare, landmarks: { main: mains, nav: navs, header: headers, footer: footers }, skip, builder, fake: fake.length, fakeNav, a11y: { unlabeled, nameless, dupIds: dupIds.length, posTab, hiddenFocus, iframesNoTitle, autoplay, badRoles } };
+}
+
 // ───────────────────────────── shared page checks (Layers 1, 2, 4, 5) ─────────────────────────────
-const ctx = { origin: '', https: true, mode: 'live', local: false, aliasOrigin: '', platform: '', redirectedFrom: '', productSite: '', kekkai: [], pages: [], titles: new Map(), descs: new Map(), slashPolicy: null, hrefs: new Set(), sitemapUrls: new Set(), internalLinked: new Set(), linkTargets: new Map(), externalOrigins: new Set(), preconnects: new Set() };
+const ctx = { origin: '', https: true, mode: 'live', local: false, aliasOrigin: '', platform: '', redirectedFrom: '', productSite: '', kekkai: [], markup: [], builder: '', pages: [], titles: new Map(), descs: new Map(), slashPolicy: null, hrefs: new Set(), sitemapUrls: new Set(), internalLinked: new Set(), linkTargets: new Map(), externalOrigins: new Set(), preconnects: new Set() };
 // ── platform detection: the fix for most findings lives in a settings screen, and the screen differs per platform
 function detectPlatform(h) {
   const g = (h.generator || '').toLowerCase(); const hosts = [...h.assetHosts].join(' ');
@@ -358,8 +438,22 @@ function pageChecks(h, pageUrl, label) {
   if (!h.twitter['twitter:card']) info('twitter', `${L}no twitter:card (X falls back to a small summary card)`); else if (h.twitter['twitter:card'] === 'summary_large_image' && !(h.twitter['twitter:image'] || og['og:image'])) warn('twitter', `${L}twitter:card=summary_large_image without an image`);
 
   if (opt.semantic) semantic(h, L);
+  markupChecks(h, L);
 }
 const norm = (s) => String(s).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+
+// ───────────────────────────── Layer 6 report ─────────────────────────────
+const FLAG_ICON = { GREEN: '🟢', YELLOW: '🟡', RED: '🔴' };
+function markupChecks(h, L) {
+  const m = h.markup; if (!m) return;
+  section('Markup & accessibility');
+  ctx.markup.push({ page: L.replace(/: $/, '') || '/', ...m });
+  if (m.builder && !ctx.builder) ctx.builder = m.builder;
+  const msg = `${L}${m.flag} ${m.score}${m.reasons.length ? ` — ${m.reasons.slice(0, 3).join(', ')}` : ''}${m.builder ? ` [${m.builder}]` : ''}`;
+  const detail = [`nodes ${m.nodes}, words ${m.words}, ${m.npw.toFixed(1)} nodes/word, wrapper chains ${m.chains} (longest ${m.longest}), ${Math.round(m.looseShare * 100)}% loose text`, `landmarks: main ${m.landmarks.main}, nav ${m.landmarks.nav}, header ${m.landmarks.header}, footer ${m.landmarks.footer}${m.skip ? ', skip link' : ''}`, ...m.reasons.slice(3).map((r) => `also: ${r}`)].join('\n');
+  results.push({ section: cur.section, level: m.flag === 'GREEN' ? 'pass' : 'warn', id: 'markup', msg, detail: m.flag === 'GREEN' ? undefined : detail, flag: m.flag, score: m.score });
+  if (m.fakeNav) fail('fake-link', `${L}${m.fakeNav} navigation item(s) are click handlers, not links — crawlers cannot follow them; the pages behind them are reachable only through the sitemap`);
+}
 
 // ───────────────────────────── Layer 5: semantic (opt-in) ─────────────────────────────
 const STOP = new Set(('a an the and or but of to in on at for with by from as is are was were be been it its this that these those not no you your we our they their he she his her i me my us them what which who how when where why all any can will just do does did so than then there here also more most very into over about up out if only own same such too s t can com www http https ' +
@@ -384,7 +478,7 @@ function semantic(h, L) {
 }
 
 // ───────────────────────────── live mode ─────────────────────────────
-const UA = 'senrigan/0.3.0 (+static site visibility check; read-only)';
+const UA = 'senrigan/0.4.0 (+static site visibility check; read-only)';
 async function get(url, { redirect = 'manual', method = 'GET' } = {}) {
   url = toLocal(url);
   const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 15000);
@@ -667,6 +761,21 @@ function distScan(dir) {
 const isDir = !/^https?:\/\//i.test(target) && existsSync(target) && statSync(target).isDirectory();
 if (isDir) distScan(target); else await liveScan(target);
 
+// ── markup grade for the site: median of the scanned pages, worst pages named
+const markupSite = (() => {
+  const ms = ctx.markup; if (!ms.length) return null;
+  const sorted = ms.map((m) => m.score).sort((a, b) => a - b); const mid = sorted.length / 2; const median = Math.round(sorted.length % 2 ? sorted[Math.floor(mid)] : (sorted[mid - 1] + sorted[mid]) / 2);
+  const n = { GREEN: 0, YELLOW: 0, RED: 0 }; for (const m of ms) n[m.flag]++;
+  const flag = ms.some((m) => m.fakeNav) || median < 50 ? 'RED' : median < 80 ? 'YELLOW' : 'GREEN';
+  const reasons = new Map(); for (const m of ms) for (const r of m.reasons.slice(0, 3)) { const k = r.replace(/\s*\(.*?\)/g, '').replace(/^\d+(\.\d+)?%?\s*(of the\s*)?/, '').replace(/\b\d+(\.\d+)?\b\s*/g, '').trim(); reasons.set(k, (reasons.get(k) || 0) + 1); }
+  const common = [...reasons.entries()].sort((a, b) => b[1] - a[1]).filter(([, c]) => c >= Math.ceil(ms.length / 2)).slice(0, 3).map(([k]) => k);
+  return { median, flag, n, pages: ms.length, common };
+})();
+if (markupSite) {
+  section('Markup & accessibility');
+  const s2 = markupSite; const builder = ctx.builder ? ` · built with ${ctx.builder}` : '';
+  results.push({ section: 'Markup & accessibility', level: 'info', id: 'markup-site', msg: `site markup ${s2.flag} ${s2.median} (median of ${s2.pages} page${s2.pages > 1 ? 's' : ''}: ${s2.n.GREEN} green, ${s2.n.YELLOW} yellow, ${s2.n.RED} red)${builder}${s2.common.length ? ` — recurring: ${s2.common.join('; ')}` : ''}` });
+}
 // ── title template: a long shared suffix on every title is a template eating the budget
 {
   const titles = [...ctx.titles.keys()]; if (titles.length >= 5) {
@@ -682,7 +791,7 @@ if (isDir) distScan(target); else await liveScan(target);
   const labels = new Set(results.map(labelOf).filter(Boolean)); const nPages = labels.size;
   if (nPages >= 3) {
     const groups = new Map();
-    results.forEach((r, i) => { const l = labelOf(r); if (!l) return; const key = `${r.section}|${r.id}|${r.level}`; const g = groups.get(key) || { idx: [], pages: new Set(), first: r }; g.idx.push(i); g.pages.add(l); groups.set(key, g); });
+    results.forEach((r, i) => { const l = labelOf(r); if (!l || r.id === 'markup') return; const key = `${r.section}|${r.id}|${r.level}`; const g = groups.get(key) || { idx: [], pages: new Set(), first: r }; g.idx.push(i); g.pages.add(l); groups.set(key, g); });
     const drop = new Set(); const add = new Map();
     for (const g of groups.values()) {
       const n = g.pages.size; if (n < 3 || n < Math.ceil(nPages * 0.6)) continue;
@@ -703,7 +812,7 @@ if (isDir) distScan(target); else await liveScan(target);
 //   DILUTED   — it can be indexed, but its signals are split, contradictory or lost
 //   DEGRADED  — it is indexed as it is, but shown worse than it could be
 const INVISIBLE = new Set(['fetch', 'status', 'robots', 'x-robots', 'noindex', 'canonical-file', 'canonical-redirect', 'hreflang-file', 'sitemap-robots', 'inner', 'sitemap-404', 'sitemap-host']);
-const DILUTED = new Set(['alias', 'https', 'canonical', 'canonical-slash', 'canonical-html', 'title-dup', 'description-dup', 'hreflang', 'hreflang-recip', 'lang', 'lang-script', 'h1', 'h-empty', 'slash', 'sitemap', 'sitemap-slash', 'sitemap-scheme', 'sitemap-gap', 'inner-redirect', 'broken', 'orphan', 'nofollow', 'nofollow-meta', 'mixed', 'jsonld-syntax', 'jsonld-context', 'jsonld-h1', 'jsonld-article', 'jsonld-legal', 'terms-link', 'og-url', 'thin']);
+const DILUTED = new Set(['alias', 'https', 'canonical', 'canonical-slash', 'canonical-html', 'title-dup', 'description-dup', 'hreflang', 'hreflang-recip', 'lang', 'lang-script', 'h1', 'h-empty', 'slash', 'sitemap', 'sitemap-slash', 'sitemap-scheme', 'sitemap-gap', 'inner-redirect', 'broken', 'orphan', 'nofollow', 'nofollow-meta', 'mixed', 'jsonld-syntax', 'jsonld-context', 'jsonld-h1', 'jsonld-article', 'jsonld-legal', 'terms-link', 'og-url', 'thin', 'fake-link']);
 const tierOf = (r) => (r.level === 'pass' || r.level === 'info') ? '' : INVISIBLE.has(r.id) && !(r.id === 'noindex' && r.level === 'warn' && !/sitemap/.test(r.msg)) ? 'INVISIBLE' : DILUTED.has(r.id) ? 'DILUTED' : 'DEGRADED';
 for (const r of results) r.tier = tierOf(r);
 const tiers = { INVISIBLE: 0, DILUTED: 0, DEGRADED: 0 }; for (const r of results) if (r.tier) tiers[r.tier]++;
@@ -714,7 +823,7 @@ const mode = isDir ? 'build output' : 'live';
 const verdict = tiers.INVISIBLE ? `SIGHT OBSCURED — ${tiers.INVISIBLE} finding(s) keep pages out of the index. A site that cannot be found is as lost as one that was broken into; fix these first.`
   : failed ? `SIGHT OBSCURED — fix the ✖ items, then ${isDir ? 'scan the live site' : 'run again against the live site'}.`
   : isDir ? 'SIGHT CLEAR — build output consistent. Next: scan the live site.' : 'SIGHT CLEAR — no failures. Re-run after deploy; Search Console is the only verdict that counts.';
-const tierLine = `INVISIBLE ${tiers.INVISIBLE} · DILUTED ${tiers.DILUTED} · DEGRADED ${tiers.DEGRADED}`;
+const tierLine = `INVISIBLE ${tiers.INVISIBLE} · DILUTED ${tiers.DILUTED} · DEGRADED ${tiers.DEGRADED}${markupSite ? ` · MARKUP ${markupSite.flag} ${markupSite.median}` : ''}`;
 const kekkaiCmd = `npx github:kappa-yashi/kekkai ${isDir ? target : target}`;
 const plainMark = { pass: '✔', warn: '!', fail: '✖', info: '·' };
 function render(fmt, color) {
@@ -728,18 +837,20 @@ function render(fmt, color) {
   if (fmt === 'md') {
     lines.push(`# senrigan (千里眼) — ${mode} scan of ${target}`, '', `**${tierLine}** · ${counts.pass} pass · ${counts.warn} warn · ${counts.fail} fail · ${counts.info} info`, '', `> ${verdict}`, '');
     if (invisible.length && !opt.summary) { lines.push('## Out of the index — fix first', ''); for (const r of invisible) lines.push(`- ${plainMark[r.level]} ${r.msg}`); lines.push(''); }
-    let last = ''; for (const r of shown) { if (r.section !== last) { lines.push('', `## ${r.section}`, ''); last = r.section; } lines.push(`- ${plainMark[r.level]} ${opt.summary && r.tier ? `**${r.tier}** ` : tag(r) ? '**INVISIBLE** ' : ''}${r.msg}${r.detail && r.level !== 'pass' ? `\n  \`${String(r.detail).replace(/\n/g, ' · ')}\`` : ''}`); }
+    let last = ''; for (const r of shown) { if (r.section !== last) { lines.push('', `## ${r.section}`, ''); last = r.section; } lines.push(`- ${r.id === 'markup' && r.flag ? FLAG_ICON[r.flag] : plainMark[r.level]} ${opt.summary && r.tier ? `**${r.tier}** ` : tag(r) ? '**INVISIBLE** ' : ''}${r.msg}${r.detail && r.level !== 'pass' ? `\n  \`${String(r.detail).replace(/\n/g, ' · ')}\`` : ''}`); }
     if (ctx.kekkai.length) lines.push('', '## Hand-off to kekkai (結界)', '', ...ctx.kekkai.map((k) => `- ${k}`), '', `Visibility and security are one boundary: \`${kekkaiCmd}\``);
     else lines.push('', `Visibility is half of it — check the security boundary too: \`${kekkaiCmd}\``);
     return lines.join('\n') + '\n';
   }
-  lines.push('', `senrigan (千里眼) — ${mode} scan of ${target}`, '', `  ${c(tiers.INVISIBLE ? 31 : 90, `INVISIBLE ${tiers.INVISIBLE}`)} · ${c(tiers.DILUTED ? 33 : 90, `DILUTED ${tiers.DILUTED}`)} · ${c(90, `DEGRADED ${tiers.DEGRADED}`)}`, '');
+  const flagColor = (f) => (f === 'RED' ? 31 : f === 'YELLOW' ? 33 : 32);
+  lines.push('', `senrigan (千里眼) — ${mode} scan of ${target}`, '', `  ${c(tiers.INVISIBLE ? 31 : 90, `INVISIBLE ${tiers.INVISIBLE}`)} · ${c(tiers.DILUTED ? 33 : 90, `DILUTED ${tiers.DILUTED}`)} · ${c(90, `DEGRADED ${tiers.DEGRADED}`)}${markupSite ? ` · ${c(flagColor(markupSite.flag), `MARKUP ${markupSite.flag} ${markupSite.median}`)}` : ''}`, '');
   if (invisible.length && !opt.summary) { lines.push(c(1, '  Out of the index — fix first')); for (const r of invisible) lines.push(`    ${mark[r.level]} ${r.msg}`); lines.push(''); }
   let last = '';
   for (const r of shown) {
     if (!opt.summary && r.section !== last) { lines.push(c(1, `  ${r.section}`)); last = r.section; }
     const t = opt.summary && r.tier ? c(r.tier === 'INVISIBLE' ? 31 : r.tier === 'DILUTED' ? 33 : 90, `${r.tier.padEnd(9)} `) : tag(r) ? c(31, 'INVISIBLE ') : '';
-    lines.push(`    ${mark[r.level]} ${t}${opt.summary ? `[${r.section}] ` : ''}${r.msg}`);
+    const msgOut = r.id === 'markup' && r.flag ? r.msg.replace(new RegExp(`\\b${r.flag} ${r.score}\\b`), c(flagColor(r.flag), `${r.flag} ${r.score}`)) : r.msg;
+    lines.push(`    ${mark[r.level]} ${t}${opt.summary ? `[${r.section}] ` : ''}${msgOut}`);
     if (!opt.summary && r.detail && r.level !== 'pass') for (const l of String(r.detail).split('\n')) lines.push(c(90, `        ${l}`));
   }
   lines.push('', `  ${c(32, counts.pass + ' pass')}  ${c(33, counts.warn + ' warn')}  ${c(31, counts.fail + ' fail')}  ${c(90, counts.info + ' info')}   ${tierLine}`, '', `  ${c(failed ? 31 : 32, verdict)}`, '');
@@ -747,7 +858,7 @@ function render(fmt, color) {
   else lines.push(c(90, `  Visibility is half of it — check the security boundary too: ${kekkaiCmd}`), '');
   return lines.join('\n');
 }
-const jsonOut = () => JSON.stringify({ target, mode: isDir ? 'dist' : 'live', counts, tiers, ok: !failed, kekkai: ctx.kekkai, results }, null, 2);
+const jsonOut = () => JSON.stringify({ target, mode: isDir ? 'dist' : 'live', counts, tiers, markup: markupSite, ok: !failed, kekkai: ctx.kekkai, results }, null, 2);
 if (opt.json) console.log(jsonOut()); else console.log(render('text', process.stdout.isTTY));
 if (opt.out) { const { writeFileSync } = await import('node:fs'); writeFileSync(opt.out, opt.out.endsWith('.json') ? jsonOut() : opt.out.endsWith('.md') ? render('md', false) : render('text', false)); console.error(`report written to ${opt.out}`); }
 process.exit(failed ? 1 : 0);

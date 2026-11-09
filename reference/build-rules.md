@@ -112,11 +112,22 @@ help from the rest of the site.
   product), and the product points back: `license` on a
   `SoftwareApplication`, `termsOfService` on a `Service`.
 
+- One `<main>` per page, a `<nav>` for each menu, `<header>` and `<footer>`;
+  a skip link to `#main` first in the body.
+- Text in text elements (`p`, `li`, headings, `figcaption`), not loose in
+  `div`/`span`. Wrappers only where layout needs them.
+- Every form field has a `<label for>` (or `aria-label`); every button has a
+  name; every iframe a `title`; ids are unique.
+
 ## DON'T
 
 - No second `<h1>` from the content, the sidebar, the footer or a widget —
   and no `role="heading" aria-level="1"` to hide one from a counter.
 - No canonical with `.html` on a host that serves clean URLs.
+- No navigation through `onclick` on `div`/`span`, no `javascript:` links, no
+  `<a>` without `href`.
+- No `tabindex` above 0, no focusable element inside `aria-hidden`, no
+  placeholder standing in for a label.
 - No heading used as a label for UI chrome ("saved", "share", "menu") —
   use a `<p>`, a `<span>` or `aria-label`.
 - No canonical to the home page from every inner page, no relative
