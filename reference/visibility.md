@@ -306,6 +306,28 @@ Sitemap: https://www.example.com/sitemap-index.xml
   `PerplexityBot`…) is a decision; the scanner lists it and does not judge.
 - A `robots.txt` answering 5xx stops Google crawling the site entirely
   until it recovers; a 404 means "allow all".
+- Each crawler obeys the one group that names it and ignores `*` when such a
+  group exists. So read the file crawler by crawler, not line by line. Some
+  site builders ship a **default-deny** template: `Disallow: /` under `*`,
+  with Googlebot and bingbot allowed by name. Google and Bing crawl it fine.
+  But it also shuts out every crawler it does not name: ChatGPT search
+  (`OAI-SearchBot`), Apple, DuckDuckGo, Yandex, and the link-preview fetchers
+  of X, LinkedIn, Facebook and WhatsApp. A shared link then shows no card.
+  If the intent was "no AI training", write it the other way round:
+
+```
+User-agent: *
+Allow: /
+
+User-agent: GPTBot
+User-agent: ClaudeBot
+User-agent: CCBot
+User-agent: Google-Extended
+User-agent: Applebot-Extended
+Disallow: /
+
+Sitemap: https://www.example.com/sitemap-index.xml
+```
 
 **Sitemap**
 

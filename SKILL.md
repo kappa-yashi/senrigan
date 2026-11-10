@@ -66,7 +66,9 @@ description — rather than dropping the check.
    an invisible site is a failed site. `✖` is a failure, `!` a weakness worth
    a decision, `·` a fact. Exit code 1 means sight is obscured. In `dist/`
    mode repeated failures are grouped (`248 more page(s): no canonical`):
-   one template is wrong, not 248 pages — fix the template.
+   one template is wrong, not 248 pages — fix the template. The report lists
+   the site first, section by section, then one block per scanned page; read
+   the site-wide lines as template fixes and the page blocks as content fixes.
 
 3. **Fix in this order** (later steps depend on earlier ones):
    1. one URL per page: host, https, trailing slash, canonical (guide PART 1)
@@ -103,21 +105,28 @@ description — rather than dropping the check.
 | navigation items are click handlers | crawlers cannot follow the menu | real `<a href>` for every destination; JavaScript may enhance, never replace, the link |
 | form field without a label | placeholder text is not a label | `<label for>` or `aria-label` |
 | INVISIBLE count > 0 | pages are out of the index right now | fix these before any other finding, then re-run live |
+| robots.txt blocks Googlebot / bingbot | the whole site is out of that index | the only robots finding that is INVISIBLE — fix it now |
+| robots.txt denies by default | `Disallow: /` under `*`, engines allowed by name: Google and Bing crawl, but ChatGPT search, Apple, DuckDuckGo and the link previews are shut out | `Allow: /` under `*`; block AI-training crawlers by name in their own group. Show the user the list the report prints before changing it — it may be deliberate |
+| scanned host ≠ canonical host | a second host serves the site with 200 | 301 it to the canonical host (kekkai covers the redirect); the scan already moved to the canonical one |
+| internal link redirects | a hop per click and per crawl, signals split across two addresses | link the final URL the report names |
+| Product next to a business | a Hotel / Restaurant / Service described as goods | drop the Product node; the business type, plus `HotelRoom` / `Offer` / `Menu` / `Service` / `Event` for what it offers |
+| focusable inside aria-hidden / hidden duplicate content | a hidden language or mobile copy still takes keyboard focus | the `hidden` attribute or `inert`, not `aria-hidden` alone; better, one language per route |
+| honeypot field recognised | an anti-spam field, not an unlabeled one | `tabindex="-1"` and `autocomplete="off"` on it |
 | dist: canonical keeps `.html` | clean-URL hosts redirect it | canonical, sitemap and links without the extension; confirm live |
 | two `<h1>` incl. `role="heading"` | the second language was hidden from the counter, not from the outline | one language per route (`/`, `/el/`) with hreflang |
-| legal page without JSON-LD on a product/service site | the terms are part of what is offered, and the graph does not show it | WebPage node (isPartOf WebSite, about the product); `license` on software, `termsOfService` on a Service |
+| legal page without JSON-LD on a product/service/business site | the terms are part of what is offered, and the graph does not show it | WebPage node (isPartOf WebSite, about the product or business); `license` on software, `termsOfService` on a Service; a business type (Hotel, LocalBusiness…) has no terms property, so the page points at it |
 | canonical points at a file | an image URL was pasted into the canonical / alternate field | the canonical is the page's own URL; the image goes in og:image |
 | canonical is a URL that redirects here | `/human` declared, `/human/` served (or `.html` vs clean URL) — the canonical never answers 200 | align canonical, sitemap and links with what the host actually serves |
 | `lang` disagrees with the title's script | language declared wrong, or a title copied across languages | lang from the route; translate the title |
 | `<h1>` is a sentence | the first paragraph sits in the heading | the name of the thing in the `<h1>`, the sentence in a `<p>` |
-| article page without Article schema | the page's JSON-LD is only the business entity | add `BlogPosting`/`Article` with headline = h1, dates, author, image |
+| article page without Article schema | the page's JSON-LD is only the business entity | add `BlogPosting`/`Article` with headline = h1, dates, author, image (not reported when the page already declares another main entity, such as software or an event) |
 | N/N pages: … — site-wide | the template, not the pages | fix it once; the bracketed hint names the platform setting |
 | `noindex` yet listed in the sitemap | you ask for indexing and refuse it in the same breath | drop it from the sitemap, or remove the noindex |
 | utility page indexable | `/search`, `/version`, `/404` compete with real pages | `noindex, follow` in the template |
 | N more pages: no canonical / no h1 | a whole route family shares a template without them | fix the template; text-only mirrors get a canonical to the HTML page or `noindex` |
 | canonical not self-referencing | the page tells Google another URL is the real one | per-page canonical from the route, not a constant |
 | canonical ≠ served path by a slash | two URLs, one page, a redirect per link | choose the policy; `trailingSlash` in the framework + redirects at the host |
-| title / description duplicates another page | the two pages compete; one gets dropped | per-page values from the content, site default only as last resort |
+| title / description duplicates another page | the two pages compete; one gets dropped | per-page values from the content, site default only as last resort (the same title on the two language versions of one page is a note: translate it) |
 | hreflang not reciprocal | the set is ignored entirely | every language page lists all languages including itself and `x-default` |
 | `<html lang>` disagrees with hreflang | mixed signals about the page language | lang from the route's locale |
 | 2 `<h1>` / no `<h1>` / h1→h3 jump | the heading skeleton is the outline crawlers and screen readers use | one `<h1>` in the template; content starts at `##`; UI labels are not headings |

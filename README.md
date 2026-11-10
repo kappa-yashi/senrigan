@@ -47,15 +47,20 @@ or clone and run `node bin/senrigan.mjs <target>`.
 
 **Layer 0 — root assets** (live and `dist/`)
 
-- `robots.txt`: parsed per group; `Disallow: /` for everyone; a `Sitemap:`
-  line; sitemap URLs that robots.txt itself blocks; AI crawlers blocked
-  (listed as a decision, not a finding)
+- `robots.txt`, read **crawler by crawler** the way crawlers read it (a
+  named group overrides `*`): the site is INVISIBLE only when Googlebot or
+  bingbot is shut out of `/`. A default-deny file (`Disallow: /` under `*`,
+  the engines let in by name) is a DILUTED warning that names everything it
+  also blocks — ChatGPT search, Apple, DuckDuckGo, the X / LinkedIn / Facebook
+  link previews — and prints the group. A `Sitemap:` line; sitemap URLs that
+  robots.txt itself blocks; AI crawlers blocked by name (a decision, not a
+  finding). A missing file is a note, an empty one a DEGRADED warning, a 5xx
+  the real danger (Google stops crawling)
 - sitemap (index files followed): URLs on another host or on `http://`,
   invalid or future `<lastmod>`, one identical `<lastmod>` everywhere (a build
   timestamp, which Google learns to ignore), mixed trailing-slash styles,
   listed URLs that redirect or 404, indexable pages that are not listed
-- all `Sitemap:` lines are merged; a `robots.txt` that blocks `*` is a failure
-  only when no `Allow: /` rescues it, and the offending group is named
+- all `Sitemap:` lines are merged, the same URL listed twice is read once
 - `favicon.ico`, `apple-touch-icon.png`, declared icons and the web manifest
   answer 200 (devices request them blindly; each 404 is wasted crawl)
 - the home document's size (a multi-megabyte HTML page is reported)
@@ -68,18 +73,24 @@ or clone and run `node bin/senrigan.mjs <target>`.
   hreflang entry
 - viewport with `width=device-width`, no zoom blocking
 - `<title>`: present, 15–60 characters, unique across the scanned pages
-- meta description: present, ≤160 characters, unique
+  (the two language versions of one page, tied by hreflang, are not
+  duplicates of each other)
+- meta description: present, ≤160 characters, unique (same rule)
 - canonical: present, absolute, `https`, same host, self-referencing; a
   canonical that points at a **file** (an image URL pasted into the SEO
   field) is a failure, and so is a canonical that names a URL which
   **redirects** to the page (the `/human` vs `/human/` trap); a plain
-  trailing-slash disagreement is a warning
+  trailing-slash disagreement is a warning. When the scanned host is not the
+  one the pages name as canonical, that is reported once and the scan moves
+  to the canonical host, instead of every page failing against the wrong one
 - `<html lang>` vs the script of the title (`lang="en"` on a Greek title)
 - a title template that appends the same long suffix to every page
 - **indexing matrix**: `noindex` on a page that is also in the sitemap is a
   failure; `noindex` on a content-looking page is a warning; a utility page
   (search, version, 404…) without `noindex` is a warning; a tag / archive page
-  is fine indexed when it has its own description
+  is fine indexed when it has its own description. A page that carries
+  `noindex` is reported for that alone — its title, headings and markup are
+  not what anyone will see
 - hreflang: valid codes, absolute hrefs, `x-default`, the page lists itself,
   and (live) every alternate links back
 - external script / font origins without `preconnect` (info);
@@ -109,18 +120,28 @@ or clone and run `node bin/senrigan.mjs <target>`.
 - internal links carrying `rel="nofollow"`
 - broken internal links (`dist/`: resolved against the output files; live: a
   sample checked with HEAD)
-- orphans: routes nothing links to; linked pages missing from the sitemap;
-  sitemap URLs the scanned pages never link to
+- internal links that point at an address which redirects (each one a hop for
+  every visitor and every crawl): listed with their destination, and the
+  destination is what counts as linked
+- orphans: routes nothing links to; linked pages missing from the sitemap
+  (live: a linked page that carries `noindex` belongs out of the sitemap and
+  is not reported); sitemap URLs the scanned pages never link to
 - generic anchor text ("click here", "here", "read more", "εδώ", "κλικ",
   "διαβάστε περισσότερα"…) and links with no text, image alt or aria-label
 
 **Layer 4 — machine-readable & social**
 
 - a page that looks like an article (blog path, or a single `<article>` with
-  a `<time>`) but carries no `Article`/`BlogPosting` type
+  a `<time>`) but carries no `Article`/`BlogPosting` type — unless it already
+  declares another main entity (a `SoftwareApplication`, an `Event`, a room…)
+- `Product` declared next to a business (`Hotel`, `Restaurant`, a
+  `…Service`): Product is for goods that are bought; the business and what it
+  offers have their own types (`HotelRoom`, `Offer`, `Menu`, `Service`,
+  `Event`)
 - legal pages (privacy, terms, cookies…) without JSON-LD: a warning when the
-  site describes a product or a service (`SoftwareApplication`, `Product`,
-  `Service`, `MedicalClinic`…) — the terms and the privacy policy are part of
+  site describes a product, a service or a business (`SoftwareApplication`,
+  `Product`, `Service`, `Hotel`, `MedicalClinic`…, read from the home page's
+  main entity, not from any node nested in it) — the terms and the privacy policy are part of
   what is offered — and a note on a plain blog or portfolio; the entity is
   checked for the property schema.org gives it for the purpose (`license` on
   software, `termsOfService` on a `Service`)
@@ -156,13 +177,18 @@ follow (a `<div onclick>` is not a link), and render cost (Core Web Vitals).
   builders emit 6–8 per widget
 - **nodes per word** of visible text, and the share of text sitting loose in
   div/span instead of `p`, `li`, headings, links
-- inline styles, classes per element, the page builder behind it (Elementor,
-  Divi, WPBakery, Oxygen, Bricks, Beaver Builder, Webflow, Wix, Framer,
-  Squarespace)
+- inline styles, the page builder behind it (Elementor, Divi, WPBakery,
+  Oxygen, Bricks, Beaver Builder, Webflow, Wix, Framer, Squarespace) and its
+  classes per element — utility-class CSS (Tailwind) is not penalised for its
+  class count
 - accessibility that can be checked without rendering: form fields without a
   label (a placeholder is not one), buttons without a name, duplicate `id`,
-  `tabindex` > 0, focusable elements inside `aria-hidden`, iframes without
-  `title`, autoplaying video with sound, invalid ARIA roles
+  `tabindex` > 0, focusable elements inside `aria-hidden` (on the element or
+  any ancestor; `hidden` and `inert` are the fix, and a whole hidden block of
+  links is named as what it usually is — the other language or a mobile copy
+  kept in the DOM), iframes without `title`, autoplaying video with sound,
+  invalid ARIA roles. Anti-spam honeypot fields are recognised and not counted
+  as unlabeled fields; the report asks for `tabindex="-1"` on them
 - **click targets that are not links** (`div`/`span` with `onclick`,
   `role="link"` without `href`, `javascript:` links)
 
@@ -171,7 +197,8 @@ three heaviest reasons; the site gets the median, shown next to the tiers in
 the header. The grade is reported beside the verdict, not inside it — with
 one exception: navigation items that are click handlers make the page RED and
 are a failure (DILUTED), because the pages behind them can only be found
-through the sitemap. Contrast and focus order need a rendering browser and
+through the sitemap; the header then says why (`MARKUP RED 75 (navigation is
+not crawlable)`). Contrast and focus order need a rendering browser and
 are out of scope.
 
 **Site-wide collapse and platform hints**
@@ -184,6 +211,14 @@ Framer, Astro, Next.js…) and relevant findings carry a hint in brackets
 pointing at that platform's setting — `[Webflow: Site settings → SEO →
 "Global canonical tag URL"]`. Greek and Latin-1 named entities
 (`&alpha;&beta;`) are decoded, so headings on page-builder sites read as text.
+
+**Report layout**
+
+The text and markdown reports print the site first — every site-wide finding
+under its section, in a fixed order (reach, root assets, head, structure,
+machine-readable, markup, links) — and then one block per scanned page, so a
+page's findings never scatter between site-wide lines. `--summary` keeps one
+line per warning or failure, sorted by tier.
 
 ## Options
 

@@ -77,7 +77,9 @@ help from the rest of the site.
 
 - `robots.txt` with a `Sitemap:` line carrying the absolute sitemap URL.
   Block crawling only of what must not be fetched; never `Disallow` an
-  admin path (that is kekkai's rule, it holds here too).
+  admin path (that is kekkai's rule, it holds here too). Default allow
+  (`User-agent: *` + `Allow: /`); crawlers you refuse get their own group by
+  name — never the other way round.
 - One sitemap (or index) with every indexable URL on the canonical host, in
   the policy slash style, with `<lastmod>` only when it is a real content
   date — omit it rather than stamp the build time on every entry.
@@ -127,7 +129,14 @@ help from the rest of the site.
 - No navigation through `onclick` on `div`/`span`, no `javascript:` links, no
   `<a>` without `href`.
 - No `tabindex` above 0, no focusable element inside `aria-hidden`, no
-  placeholder standing in for a label.
+  placeholder standing in for a label. Content kept in the DOM but hidden
+  (the other language, a mobile copy) gets `hidden` or `inert`, not
+  `aria-hidden` alone. A honeypot field gets `tabindex="-1"` and
+  `autocomplete="off"`.
+- No internal link to an address that redirects: link the final URL.
+- No `Product` node for a hotel, a restaurant or a service: use the
+  business type, and `HotelRoom` / `Offer` / `Menu` / `Service` / `Event` for
+  what it offers.
 - No heading used as a label for UI chrome ("saved", "share", "menu") —
   use a `<p>`, a `<span>` or `aria-label`.
 - No canonical to the home page from every inner page, no relative
@@ -135,7 +144,9 @@ help from the rest of the site.
 - No `<meta name="robots" content="noindex">` on templates shared by
   content pages "just for now".
 - No sitemap entries for redirects, 404s, noindex pages, staging hosts.
-- No `Disallow: /` left over from staging.
+- No `Disallow: /` left over from staging, and no default-deny template
+  (`Disallow: /` under `*` with the engines allowed by name): it also shuts
+  out ChatGPT search, Apple, DuckDuckGo and every link preview.
 - No `rel="nofollow"` on your own links, no `nofollow` in the robots meta
   of indexable pages.
 - No `http://` anywhere in the output.
