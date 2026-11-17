@@ -10,21 +10,26 @@
 //   --summary           print only warnings and failures, one line each, plus the counts
 //   --out <file>        also write the report to a file (.json → JSON, .md → markdown, else plain text)
 //   --strict            warnings count as failures (exit 1)
-//   --pages N           live: how many inner pages to scan from the sitemap (default 8)
+//   --pages N           live: how many inner pages to scan from the sitemap (default 8; on a
+//                       multilingual site each page is taken with its language alternates)
 //   --semantic          Layer 5: keyword / title overlap per page (opt-in, informational)
 //   --no-probe          live: skip the root-asset probes (favicons, llms.txt, manifest) and link HEADs
 //   --base <url>        dist: the public origin, so absolute canonicals / og:url can be judged
 //   --dist              force dist mode for a folder
+//   --logs <file|dir>   also read crawler access logs (Apache/nginx combined or JSON lines, .gz ok):
+//                       who crawled what, verified against the engines' published IP ranges
 //
 // Only scan sites you own or are allowed to test.
 
-import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync, existsSync, writeFileSync } from 'node:fs';
+import { gunzipSync } from 'node:zlib';
+import { tmpdir } from 'node:os';
 import { join, relative, extname, dirname, sep } from 'node:path';
 
 // ───────────────────────────── cli ─────────────────────────────
 const argv = process.argv.slice(2);
-const opt = { json: false, summary: false, out: '', strict: false, pages: 8, semantic: false, probe: true, base: '', mode: '' };
-const KNOWN_FLAGS = ['--json', '--summary', '--out', '--strict', '--pages', '--semantic', '--no-probe', '--base', '--dist', '-h', '--help'];
+const opt = { json: false, summary: false, out: '', strict: false, pages: 8, semantic: false, probe: true, base: '', mode: '', logs: [] };
+const KNOWN_FLAGS = ['--json', '--summary', '--out', '--strict', '--pages', '--semantic', '--no-probe', '--base', '--dist', '--logs', '-h', '--help'];
 const similar = (a) => KNOWN_FLAGS.map((f) => [f, [...f].filter((ch, i) => a[i] === ch).length / Math.max(f.length, a.length)]).sort((x, y) => y[1] - x[1])[0];
 let target = '';
 for (let i = 0; i < argv.length; i++) {
@@ -39,6 +44,7 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === '--no-probe') opt.probe = false;
   else if (a === '--base') opt.base = (argv[++i] || '').replace(/\/+$/, '');
   else if (a === '--dist') opt.mode = 'dist';
+  else if (a === '--logs') { const v = argv[++i]; if (v) opt.logs.push(v); }
   else if (a === '-h' || a === '--help') { usage(); process.exit(0); }
   else target = a;
 }
@@ -50,7 +56,8 @@ function usage() {
   senrigan https://www.example.com      live scan (read-only GET/HEAD requests)
   senrigan ./dist [--base https://host] scan a build folder
 
-  --json  --summary  --out <file.md|.json|.txt>  --strict  --pages N  --semantic  --no-probe  --base <url>  --dist`);
+  --json  --summary  --out <file.md|.json|.txt>  --strict  --pages N  --semantic  --no-probe  --base <url>  --dist
+  --logs <file|folder>   read crawler access logs (combined / JSON lines, .gz ok) next to the scan`);
 }
 
 // ───────────────────────────── report ─────────────────────────────
@@ -62,7 +69,9 @@ const warn = (id, msg, detail) => results.push({ section: cur.section, level: 'w
 const fail = (id, msg, detail) => results.push({ section: cur.section, level: 'fail', id, msg, detail });
 const info = (id, msg, detail) => results.push({ section: cur.section, level: 'info', id, msg, detail });
 const sfx = (n) => (n === 1 ? '' : 's');
-const SECTIONS = ['Reach', 'Root assets', 'Head & rendering', 'Structure', 'Machine-readable & social', 'Markup & accessibility', 'Links & network', 'Semantic (--semantic)'];
+// approximate rendered width of a result title (Arial ~20px, as Google shows it): narrow, regular, capital and wide glyphs
+const pxWidth = (t) => { let w = 0; for (const ch of t) w += /[ilIjft.,:;'|!·ιΙ]/.test(ch) ? 5.6 : /[r()\[\]\-– ]/.test(ch) ? 6.7 : /[mwMWΩΨΜΦωψμ—]/.test(ch) ? 16.7 : /[A-ZΑ-ΩΆ-Ώ0-9&%@]/.test(ch) ? 13.3 : 11.1; return Math.round(w); };
+const SECTIONS = ['Reach', 'Root assets', 'Head & rendering', 'Structure', 'Machine-readable & social', 'Markup & accessibility', 'Links & network', 'Crawlers', 'Semantic (--semantic)'];
 
 // ───────────────────────────── html helpers ─────────────────────────────
 const lower = (h) => Object.fromEntries(Object.entries(h).map(([k, v]) => [k.toLowerCase(), v]));
@@ -216,6 +225,17 @@ function analyzeMarkup(clean, htmlLen, text) {
   const fakeNav = fake.filter(inNav).length;
   const skip = (() => { const a = all.find((n) => n.tag === 'a' && attr(n.attrs, 'href') != null); return !!a && /^#/.test(attr(a.attrs, 'href')); })();
   // score
+  // alt="" is right for decoration and wrong for content: judge each empty alt by what surrounds it in the served HTML
+  const altEmpty = [];
+  for (const n of all) {
+    if (n.tag !== 'img' || attr(n.attrs, 'alt') !== '' || removed(n)) continue;
+    const src = attr(n.attrs, 'src') || attr(n.attrs, 'data-src') || '';
+    const hidden = ariaHidden(n) || up(n, (a) => /\brole\s*=\s*["']?(?:presentation|none)\b/i.test(a.attrs));
+    let ctl = n.parent; for (let i = 0; ctl && ctl.tag !== '#root' && ctl.tag !== 'a' && ctl.tag !== 'button' && i < 4; i++) ctl = ctl.parent;
+    const sole = !hidden && ctl && (ctl.tag === 'a' || ctl.tag === 'button') && !textOf(ctl) && !named(ctl);
+    const w = Number(attr(n.attrs, 'width')) || Number((attr(n.attrs, 'style') || '').match(/(?:^|;)\s*width\s*:\s*(\d+)px/i)?.[1]) || 0;
+    altEmpty.push({ src, hidden, sole: !!sole, ctl: sole ? ctl.tag : '', wide: w >= 200, fig: up(n, (a) => a.tag === 'figure') });
+  }
   // each penalty carries a stable key, so the site summary groups "1 button" and "3 buttons" as one recurring reason
   const pen = []; const P = (pts, why, key) => { if (pts > 0) pen.push([pts, why, key]); };
   if (!mains) P(10, 'no <main>', 'no-main'); else if (mains > 1) P(5, `${mains} <main>`, 'multi-main');
@@ -241,7 +261,7 @@ function analyzeMarkup(clean, htmlLen, text) {
   const notes = [];
   if (honeyTab) notes.push(['honeypot', `anti-spam honeypot field recognised (not counted) — add tabindex="-1" and autocomplete="off" so keyboard users never land in it`]);
   if (hiddenDup) notes.push(['hidden-dup', `${hiddenFocus} links/fields are focusable inside aria-hidden — hidden duplicate content (a language toggle or a mobile copy?): use the hidden attribute or inert, which also take it out of the tab order; aria-hidden only silences it`]);
-  return { score, flag, reasons: pen.map(([, w]) => w), keys: pen.map(([, , k]) => k), notes, nodes: all.length, words, npw, chains, longest, looseShare, landmarks: { main: mains, nav: navs, header: headers, footer: footers }, skip, builder, fake: fake.length, fakeNav, a11y: { unlabeled, nameless, dupIds: dupIds.length, posTab, hiddenFocus, honeypots: honey.length, iframesNoTitle, autoplay, badRoles } };
+  return { altEmpty, score, flag, reasons: pen.map(([, w]) => w), keys: pen.map(([, , k]) => k), notes, nodes: all.length, words, npw, chains, longest, looseShare, landmarks: { main: mains, nav: navs, header: headers, footer: footers }, skip, builder, fake: fake.length, fakeNav, a11y: { unlabeled, nameless, dupIds: dupIds.length, posTab, hiddenFocus, honeypots: honey.length, iframesNoTitle, autoplay, badRoles } };
 }
 
 // ───────────────────────────── shared page checks (Layers 1, 2, 4, 5) ─────────────────────────────
@@ -297,6 +317,8 @@ function legalLinkCheck(t, ldText) {
 const KEKKAI = (why) => { if (!ctx.kekkai.includes(why)) ctx.kekkai.push(why); };
 const H = (id) => { const h = HINTS[ctx.platform]?.[id]; return h ? ` [${ctx.platform}: ${h}]` : ''; };
 const abs = (href, base) => { try { return new URL(href, base).href; } catch { return null; } };
+// an image compared by its file name: CDNs add sizes and versions in the query, and absolute vs relative differ
+const imgKey = (u) => String(u).split(/[?#]/)[0].split('/').pop().toLowerCase();
 const isHttp = (u) => /^https?:\/\//i.test(u || '');
 const sameHost = (u) => { try { const h = new URL(u).host; return h === new URL(ctx.origin).host || (ctx.aliasOrigin && h === new URL(ctx.aliasOrigin).host); } catch { return false; } };
 // when scanning a local preview, absolute URLs that name the production host are fetched from the local server instead
@@ -339,16 +361,19 @@ function pageChecks(h, pageUrl, label) {
   if (h.title == null || !h.title) fail('title', `${L}no <title>`);
   else {
     const n = [...h.title].length;
+    const px = pxWidth(h.title);
     if (n > 60) warn('title', `${L}title is ${n} chars — likely truncated in results: "${h.title.slice(0, 70)}…"${H('title')}`);
+    // Google cuts by width, not by count: capitals and Greek run wide, so 55 characters can already overflow
+    else if (px > 600) warn('title', `${L}title is ${n} chars but about ${px} px wide — Google cuts near 580–600 px: "${h.title}"`);
     const greek = (h.title.match(/[\u0370-\u03ff]/g) || []).length, latin = (h.title.match(/[a-z]/gi) || []).length;
-    if (h.lang && !/^el/i.test(h.lang) && greek > latin) warn('lang-script', `${L}<html lang="${h.lang}"> but the title is Greek — the page language is declared wrong, or the title was copied from the other language`); else if (n < 15) warn('title', `${L}title is only ${n} chars: "${h.title}"`); else pass('title', `${L}title ${n} chars: "${h.title}"`);
+    if (h.lang && !/^el/i.test(h.lang) && greek > latin) warn('lang-script', `${L}<html lang="${h.lang}"> but the title is Greek — the page language is declared wrong, or the title was copied from the other language`); else if (n < 15) warn('title', `${L}title is only ${n} chars: "${h.title}"`); else if (n <= 60 && px <= 600) { pass('title', `${L}title ${n} chars: "${h.title}"`); if (n < 30) info('title-short', `${L}title is short (${n} chars) — fine when the page is simple; otherwise room for what the page offers and to whom`); }
     const prev = ctx.titles.get(h.title); if (prev && prev !== selfKey) (isAlt(prev) ? info('title-alt', `${L}same title as its hreflang alternate ${prev} — not a duplicate; translate it when you can`) : warn('title-dup', `${L}title duplicates ${prev}`)); else ctx.titles.set(h.title, selfKey);
   }
   // description
   if (h.description == null || !h.description.trim()) warn('description', `${L}no meta description — snippet will be guessed from the page`);
   else {
     const n = [...h.description].length;
-    if (n > 160) warn('description', `${L}description is ${n} chars — truncated around 155–160${H('description')}`); else if (n < 50) info('description', `${L}description is short (${n} chars)`); else pass('description', `${L}description ${n} chars`);
+    if (n > 160) warn('description', `${L}description is ${n} chars — truncated around 155–160${H('description')}`); else if (n < 50) info('description', `${L}description is short (${n} chars)`); else { pass('description', `${L}description ${n} chars`); if (n < 110) info('description-short', `${L}description ${n} chars — room unused: snippets show about 150–160`); }
     const prev = ctx.descs.get(h.description); if (prev && prev !== selfKey) (isAlt(prev) ? info('description-alt', `${L}same description as its hreflang alternate ${prev} — not a duplicate; translate it when you can`) : warn('description-dup', `${L}description duplicates ${prev}`)); else ctx.descs.set(h.description, selfKey);
   }
   // canonical
@@ -407,7 +432,17 @@ function pageChecks(h, pageUrl, label) {
   const imgs = h.images;
   if (imgs.length) {
     const noAlt = imgs.filter((i) => i.alt == null); if (noAlt.length) fail('img-alt', `${L}${noAlt.length}/${imgs.length} <img> without alt (decorative images need alt="")`, noAlt.slice(0, 4).map((i) => i.src).join('\n'));
-    else pass('img-alt', `${L}all ${imgs.length} <img> carry alt`);
+    // empty alt: decorative is fine, content is not — content = the only thing inside a link or button, ≥200 px wide, in a <figure>, or the image the JSON-LD names
+    const ldImgs = new Set(); const walkLd = (v, k) => { if (!v) return; if (typeof v === 'string') { if (/^(?:image|thumbnailUrl|contentUrl|logo|url)$/.test(k || '') && /\.(?:jpe?g|png|webp|avif|gif)(?:[?#]|$)/i.test(v)) ldImgs.add(imgKey(v)); return; } if (Array.isArray(v)) return v.forEach((x) => walkLd(x, k)); if (typeof v === 'object') for (const [kk, vv] of Object.entries(v)) walkLd(vv, kk === 'url' ? k : kk); };
+    walkLd(h.jsonld);
+    const ae = h.markup?.altEmpty || [];
+    const content = ae.filter((x) => !x.hidden && (x.sole || x.wide || x.fig || (x.src && ldImgs.has(imgKey(x.src)))));
+    if (content.length) {
+      const why = (x) => [x.sole && `the only content of a ${x.ctl === 'a' ? 'link' : 'button'}, which is left without a name`, x.src && ldImgs.has(imgKey(x.src)) && 'the image the JSON-LD names', x.fig && 'inside a <figure>', x.wide && '200 px or wider'].filter(Boolean).join(', ');
+      warn('img-alt-empty', `${L}${content.length} <img alt=""> that look like content — alt="" tells screen readers and Google Images to skip an image; describe these`, content.slice(0, 8).map((x) => `${(x.src.split('?')[0].split('/').pop() || '(no src)').slice(0, 60)} — ${why(x)}`).join('\n'));
+    }
+    const hiddenAlt = ae.filter((x) => x.hidden).length; if (hiddenAlt) info('img-alt-hidden', `${L}${hiddenAlt} <img alt=""> inside aria-hidden / role="presentation" — right for assistive tech, but Google Images never sees them`);
+    else if (!content.length) pass('img-alt', `${L}all ${imgs.length} <img> carry alt${ae.length ? ` (${ae.length} with alt="", decorative)` : ''}`);
     const noDim = imgs.filter((i) => !i.width || !i.height); if (noDim.length) warn('img-dim', `${L}${noDim.length}/${imgs.length} <img> without width+height — layout shift (CLS)${H('img-dim')}`);
     const eager = imgs.filter((i) => i.loading !== 'lazy' && i.fetchpriority !== 'high'); if (imgs.length > 2 && eager.length > 2) info('img-lazy', `${L}${eager.length}/${imgs.length} <img> without loading="lazy" (keep the hero eager, lazy-load the rest)`);
     const noDec = imgs.filter((i) => i.decoding !== 'async'); if (noDec.length) info('img-decoding', `${L}${noDec.length}/${imgs.length} <img> without decoding="async"`);
@@ -450,7 +485,7 @@ function machineChecks(h, pageUrl, L, path, h1s) {
   const topTypes = nodesLd.flatMap((n) => [].concat(n['@type']));
   // a page that already says what it is (software, a product, an event, a room…) is not missing an Article
   const otherMain = topTypes.some((t) => !SCAFFOLD.has(t) && !SITE_OWNER_RE.test(t) && !BUSINESS_RE.test(t) && !/Article|BlogPosting|Posting$/.test(t));
-  const LEGAL_RE = /\/(?:privacy|terms|legal|cookies?|accessibility|imprint|impressum|gdpr|politiki|oroi|aporrit|prosvasim)[^/]*(?:\/|$)/i;
+  const LEGAL_RE = /\/(?:privacy|terms|legal|cookies?|accessibility|imprint|impressum|gdpr|shipping|delivery|returns?|refunds?|payments?|policies|policy|politiki|politikes|oroi|aporrit|prosvasim|apostol|epistrof|pliromes|tropoi)[^/]*(?:\/|$)/i;
   const BLOG_RE = /\/(?:blog|posts?|news|articles?|journal|stories|arthra|nea)\/[^/?#]+/i;
   const ldTypesStr = JSON.stringify(h.jsonld);
   const legal = LEGAL_RE.test(path);
@@ -461,7 +496,7 @@ function machineChecks(h, pageUrl, L, path, h1s) {
   }
   else if (nodesLd.length) {
     if (topTypes.includes('Product')) { const host = topTypes.find((t) => t !== 'Product' && BUSINESS_RE.test(t)); if (host) warn('jsonld-product', `${L}Product declared next to ${host} — Product is for goods that are bought and shipped; a ${host} is described by its own type, and what it offers by theirs (HotelRoom / Offer, Menu, Service, Event). A Product here invites review and price rich-result checks the page cannot pass`); }
-    if ((BLOG_RE.test(path) || (h.articleTag && h.times.length)) && !otherMain && !/"(?:CollectionPage|ItemList|SearchResultsPage)"/.test(ldTypesStr) && !/"(?:Article|BlogPosting|NewsArticle|TechArticle|ScholarlyArticle)"/.test(ldTypesStr)) warn('jsonld-article', `${L}looks like an article (${BLOG_RE.test(path) ? 'blog path' : '<article> + <time>'}) but the JSON-LD has no Article/BlogPosting — no article rich results, no Discover`);
+    if ((BLOG_RE.test(path) || (h.articleTag && h.times.length)) && !otherMain && !LEGAL_RE.test(path) && !/"(?:CollectionPage|ItemList|SearchResultsPage)"/.test(ldTypesStr) && !/"(?:Article|BlogPosting|NewsArticle|TechArticle|ScholarlyArticle)"/.test(ldTypesStr)) warn('jsonld-article', `${L}looks like an article (${BLOG_RE.test(path) ? 'blog path' : '<article> + <time>'}) but the JSON-LD has no Article/BlogPosting — no article rich results, no Discover`);
     const types = nodesLd.map((n) => [].concat(n['@type']).join('/'));
     const noCtx = h.jsonld.filter((b) => !b['@context']); if (noCtx.length) fail('jsonld-context', `${L}JSON-LD block without @context`);
     pass('jsonld', `${L}JSON-LD types: ${[...new Set(types)].join(', ')}`);
@@ -511,7 +546,7 @@ function markupChecks(h, L) {
   const msg = `${L}${m.flag} ${m.score}${m.reasons.length ? ` — ${m.reasons.slice(0, 3).join(', ')}` : ''}${m.builder ? ` [${m.builder}]` : ''}`;
   const detail = [`nodes ${m.nodes}, words ${m.words}, ${m.npw.toFixed(1)} nodes/word, wrapper chains ${m.chains} (longest ${m.longest}), ${Math.round(m.looseShare * 100)}% loose text`, `landmarks: main ${m.landmarks.main}, nav ${m.landmarks.nav}, header ${m.landmarks.header}, footer ${m.landmarks.footer}${m.skip ? ', skip link' : ''}`, ...m.reasons.slice(3).map((r) => `also: ${r}`)].join('\n');
   results.push({ section: cur.section, level: m.flag === 'GREEN' ? 'pass' : 'warn', id: 'markup', msg, detail: m.flag === 'GREEN' ? undefined : detail, flag: m.flag, score: m.score });
-  if (m.fakeNav) fail('fake-link', `${L}${m.fakeNav} navigation item${sfx(m.fakeNav)} ${m.fakeNav === 1 ? 'is a click handler' : 'are click handlers'}, not links — crawlers cannot follow them; the pages behind them are reachable only through the sitemap`);
+  if (m.fakeNav) fail('fake-link', `${L}${m.fakeNav} navigation item${sfx(m.fakeNav)} ${m.fakeNav === 1 ? 'is a click handler, not a link — crawlers cannot follow it' : 'are click handlers, not links — crawlers cannot follow them'}; the pages behind them are reachable only through the sitemap`);
   for (const [id, msg2] of m.notes || []) (id === 'hidden-dup' ? warn : info)(id, `${L}${msg2}`);
 }
 
@@ -537,11 +572,81 @@ function semantic(h, L) {
   if (!h.hasMain) info('main', `${L}no <main>/<article> — the whole body was used as content (navigation words may dominate)`);
 }
 
+// ───────────────────────────── brand entity, text files, llms.txt ─────────────────────────────
+// the site owner as an entity: what the knowledge graph needs to tell this brand from every other with a similar name
+function orgCheck(jsonld) {
+  section('Machine-readable & social');
+  const nodes = []; const walk = (v) => { if (!v || typeof v !== 'object') return; if (Array.isArray(v)) return v.forEach(walk); if (v['@type']) nodes.push(v); for (const x of Object.values(v)) if (x && typeof x === 'object') walk(x); }; walk(jsonld);
+  const isOrg = (t) => /^(?:Organization|Corporation|NGO|OnlineStore|OnlineBusiness|NewsMediaOrganization|EducationalOrganization|SportsOrganization|PerformingGroup|MusicGroup)$/.test(t) || BUSINESS_RE.test(t);
+  const types = (n) => [].concat(n['@type']);
+  const org = nodes.find((n) => types(n).some(isOrg) && n.name) || nodes.find((n) => types(n).some(isOrg)); const person = !org && nodes.find((n) => types(n).includes('Person'));
+  if (!org && !person) { info('org-entity', 'no Organization (or Person) on the home page — the brand has no entity for the knowledge graph: name, url, logo, description, sameAs'); return; }
+  const n = org || person; const t = types(n).find((x) => isOrg(x) || x === 'Person'); const miss = [];
+  if (!n.description) miss.push('description'); if (!n.sameAs || ![].concat(n.sameAs).filter(Boolean).length) miss.push('sameAs (its social and directory profiles)');
+  if (org && !n.logo) miss.push('logo'); if (!n.url) miss.push('url');
+  if (miss.length) warn('org-entity', `${t} "${n.name || '?'}" on the home page without ${miss.join(', ')} — sameAs is how the knowledge graph ties a name to its profiles; without it the brand is a string that matches other brands`);
+  else pass('org-entity', `${t} "${n.name}" with description, sameAs${org ? ', logo' : ''} and url`);
+  if (org && !n.disambiguatingDescription) info('org-disambig', `${t} without disambiguatingDescription — one line is worth it when the name is new or close to others ("${n.name || 'X'}, the … in … — not …")`);
+}
+// text files with Greek (or any non-ASCII) need the charset in the header: without it browsers and many readers fall back to Latin-1
+function charsetCheck(p, r, level = warn) {
+  const ct = r.headers['content-type'] || '';
+  if (/[^\x00-\x7F]/.test(r.text) && !/charset\s*=\s*"?utf-?8/i.test(ct) && r.text.charCodeAt(0) !== 0xFEFF) level('charset', `${p}: non-ASCII text served as "${ct || 'no Content-Type'}" without charset=utf-8 — browsers and some readers decode it as Latin-1 and Greek turns to mojibake; serve "${/markdown/i.test(ct) ? 'text/markdown' : 'text/plain'}; charset=utf-8"`);
+}
+const hasId = (html, id) => new RegExp(`\\s(?:id|name)\\s*=\\s*["']?${id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:["'\\s>/])`, 'i').test(html);
+// llms.txt / llms-full.txt read against the site: every link answers 200 at its final address, every #fragment exists, every page is in the sitemap
+async function llmsAudit(p, text, fetchPage) {
+  const issues = [], details = [], notes = [];
+  if (!/^#\s+\S/m.test(text)) issues.push('no H1');
+  if (p === '/llms.txt' && !/^>\s+\S/m.test(text)) issues.push('no blockquote summary after the H1');
+  const links = [...text.matchAll(/\]\(([^)\s]+)\)/g)].map((m) => m[1]).filter((l) => !/^(?:mailto|tel):/i.test(l));
+  const base = `${ctx.origin || 'https://x.invalid'}${p}`;
+  const mine = (u) => { try { const x = new URL(u); return sameHost(u) || x.host === 'x.invalid'; } catch { return false; } };
+  const byPage = new Map();
+  for (const l of links) { const u = abs(l, base); if (!u || !mine(u)) continue; const x = new URL(u); const k = x.origin + x.pathname + x.search; if (!byPage.has(k)) byPage.set(k, new Set()); if (x.hash.length > 1) byPage.get(k).add(decodeURIComponent(x.hash.slice(1))); }
+  const dead = [], redir = [], frag = [], offMap = [];
+  const pages = [...byPage].slice(0, 40);
+  for (const [u, hashes] of pages) {
+    const path = new URL(u).pathname + new URL(u).search;
+    const r = await fetchPage(u, hashes.size > 0);
+    if (r.status >= 400 || r.status === 0) { dead.push(`${path} → ${r.status || r.error}`); continue; }
+    if (r.status >= 300) { redir.push(`${path} → ${r.status} → ${r.location ? (abs(r.location, u) || r.location).replace(ctx.origin, '') : '?'}`); continue; }
+    for (const id of hashes) if (r.html != null && !hasId(r.html, id)) frag.push(`${path}#${id} — no element with that id`);
+    if (ctx.sitemapUrls.size && !/\.(?:txt|md|xml|json|pdf|zip)$/i.test(path) && !ctx.sitemapUrls.has(normKey(u))) offMap.push(`${path} — not in the sitemap`);
+  }
+  if (dead.length) { issues.push(`${dead.length} dead link${sfx(dead.length)}`); details.push(...dead); }
+  if (redir.length) { issues.push(`${redir.length} link${sfx(redir.length)} through a redirect`); details.push(...redir); }
+  if (frag.length) { issues.push(`${frag.length} #fragment${sfx(frag.length)} pointing at nothing`); details.push(...frag); }
+  if (offMap.length) { issues.push(`${offMap.length} page${sfx(offMap.length)} not in the sitemap (removed, renamed, or never listed)`); details.push(...offMap); }
+  if (p === '/llms.txt' && ctx.sitemapUrls.size) {
+    const named = new Set([...byPage.keys()].map(normKey)); const covered = [...ctx.sitemapUrls].filter((k) => named.has(k)).length;
+    const sec = (k) => { const parts = k.split('/').filter(Boolean); if (parts.length > 1 && /^[a-z]{2}(?:-[a-z]{2})?$/i.test(parts[0])) parts.shift(); return parts.length > 1 ? parts[0] : ''; };
+    const secs = new Map(); for (const k of ctx.sitemapUrls) { const s2 = sec(k); if (!s2) continue; const e = secs.get(s2) || secs.set(s2, { n: 0, hit: 0 }).get(s2); e.n++; if (named.has(k)) e.hit++; }
+    const silent = [...secs].filter(([, e]) => !e.hit && e.n >= 2).map(([k, e]) => `/${k}/ (${e.n})`);
+    notes.push(`names ${covered}/${ctx.sitemapUrls.size} sitemap URLs${silent.length ? `; sections it never mentions: ${silent.slice(0, 6).join(', ')}` : ''} — an index for agents, it does not need every page, but a stale one sends them to pages that changed`);
+  }
+  return { issues, details, notes, links: links.length, checked: pages.length };
+}
+function llmsReport(p, a, extra = '') {
+  if (a.issues.length) warn('llms', `${p}: ${a.issues.join('; ')}${extra}`, a.details.slice(0, 10).join('\n') || undefined);
+  else pass('llms', `${p}: H1, ${a.links} link${sfx(a.links)}, ${a.checked} page${sfx(a.checked)} checked${extra}`);
+  for (const n of a.notes) info('llms', `${p}: ${n}`);
+}
+// per-language view: a multilingual site is several sites sharing templates, and one language can fail where the other passes
+function langSummary() {
+  const byLang = new Map();
+  for (const p of ctx.pages) { if (p.noindex || !p.h) continue; const lg = (p.h.lang || '?').toLowerCase().split('-')[0]; const e = byLang.get(lg) || byLang.set(lg, { pages: 0, labels: new Set() }).get(lg); e.pages++; if (p.label) e.labels.add(p.label); }
+  if (byLang.size < 2) return;
+  const found = (labels) => results.filter((r) => (r.level === 'warn' || r.level === 'fail') && labels.has(r.msg.match(/^(\/\S*): /)?.[1])).length;
+  section('Head & rendering');
+  info('languages', `by language: ${[...byLang].map(([lg, e]) => { const f = found(e.labels); return `${lg} ${e.pages} page${sfx(e.pages)}, ${f} finding${sfx(f)}`; }).join(' · ')}`);
+}
+
 // ───────────────────────────── live mode ─────────────────────────────
-const UA = 'senrigan/0.5.0 (+static site visibility check; read-only)';
-async function get(url, { redirect = 'manual', method = 'GET' } = {}) {
+const UA = 'senrigan/0.6.0 (+static site visibility check; read-only)';
+async function get(url, { redirect = 'manual', method = 'GET', timeout = 15000 } = {}) {
   url = toLocal(url);
-  const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 15000);
+  const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), timeout);
   try {
     const r = await fetch(url, { method, redirect, headers: { 'user-agent': UA, 'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8', 'accept-language': 'en,el;q=0.8' }, signal: ctl.signal });
     const buf = method === 'HEAD' ? Buffer.alloc(0) : Buffer.from(await r.arrayBuffer());
@@ -617,6 +722,7 @@ async function liveScan(input, hop = 0) {
   if (doc.status !== 200) { fail('status', `${u.href} answered ${doc.status}`); return; }
   const finalUrl = new URL(doc.url); ctx.origin = finalUrl.origin; ctx.https = finalUrl.protocol === 'https:'; ctx.mode = 'live';
   pass('status', `${finalUrl.href} 200 (${doc.bytes} bytes)`);
+  if (!hop) info('served-html', 'read as served, without running JavaScript — images, links and text that scripts add (galleries, hover trails, popups built in the browser) are not seen here, and not by a crawler on its first pass either');
   if (doc.bytes > 1_500_000) warn('html-size', `home HTML is ${(doc.bytes / 1e6).toFixed(1)} MB — crawlers truncate very large documents and render budgets suffer; inline SVGs, inline CSS/JS or embedded data are the usual cause`);
   else if (doc.bytes > 500_000) info('html-size', `home HTML is ${Math.round(doc.bytes / 1024)} KB — on the heavy side for a static page`);
   const ct = doc.headers['content-type'] || ''; if (!/text\/html/i.test(ct)) warn('content-type', `document Content-Type is "${ct}"`); if (!/charset=/i.test(ct) && !/<meta[^>]+charset/i.test(doc.text)) warn('charset', 'no charset in Content-Type nor <meta charset>');
@@ -655,9 +761,10 @@ async function liveScan(input, hop = 0) {
   else if (rob.status !== 200 || /<html/i.test(rob.text.slice(0, 300))) info('robots-file', `no robots.txt (${rob.status === 200 ? 'an HTML page answers' : rob.status}) — crawlers assume "allow all"; add one for the Sitemap line`);
   else {
     groups = parseRobots(rob.text);
-    robotsReport(groups);
+    robotsReport(groups); charsetCheck('/robots.txt', rob, info);
     if (!groups.sitemaps) warn('robots-sitemap', 'robots.txt has no "Sitemap:" line — add the absolute sitemap URL');
   }
+  ctx.robotsGroups = groups;
   const smUrls = (groups.sitemaps || []).map((s) => abs(s, ctx.origin)).filter(Boolean); if (!smUrls.length) smUrls.push(`${ctx.origin}/sitemap-index.xml`, `${ctx.origin}/sitemap.xml`);
   let sitemap = { urls: [], errors: [] }; const smUsedList = []; const seenLoc = new Set();
   const declared = (groups.sitemaps || []).length > 0;
@@ -687,16 +794,29 @@ async function liveScan(input, hop = 0) {
     else pass('icons', `favicon.ico + apple-touch-icon + declared icons all 200`);
     if (!iconLinks.some((l) => l.rel.includes('apple-touch-icon'))) info('icons', 'no <link rel="apple-touch-icon"> — iOS requests /apple-touch-icon.png anyway');
     const man = htmlHead.links.find((l) => l.rel.includes('manifest')); if (man) { const r = await status(abs(man.href, doc.url)); if (r.status !== 200) warn('manifest', `manifest ${man.href} → ${r.status}`); }
+    const fetchLive = async (u, needHtml) => { const r = needHtml ? await get(u) : await status(u); return { status: r.status, location: r.headers.location, html: needHtml ? r.text : null, error: r.error }; };
+    let llmsText = '';
     for (const p of ['/llms.txt', '/llms-full.txt']) {
-      const r = await get(ctx.origin + p);
-      if (r.status !== 200 || soft404(r) || /<html/i.test(r.text.slice(0, 300))) { if (p === '/llms.txt') info('llms', 'no /llms.txt (optional: a markdown index for AI agents / RAG)'); continue; }
-      const issues = []; if (!/^#\s+\S/m.test(r.text)) issues.push('no H1');
-      if (!/^>\s+\S/m.test(r.text) && p === '/llms.txt') issues.push('no blockquote summary after the H1');
-      const links = [...r.text.matchAll(/\]\(([^)\s]+)\)/g)].map((m) => m[1]).filter((l) => !/^mailto:/.test(l)); let dead = 0; const check = links.slice(0, 12);
-      for (const l of check) { const lu = abs(l, ctx.origin + p); if (!lu || !sameHost(lu)) continue; const s = await status(lu); if (s.status >= 400 || s.status === 0) dead++; }
-      if (dead) issues.push(`${dead}/${check.length} checked links dead`);
-      if (/text\/html/i.test(r.headers['content-type'] || '')) issues.push(`served as ${r.headers['content-type']}, should be text/plain or text/markdown`);
-      if (issues.length) warn('llms', `${p}: ${issues.join('; ')}`); else pass('llms', `${p}: H1, ${links.length} links, ${check.length} checked ok`);
+      const t0 = Date.now(); const r = await get(ctx.origin + p, { timeout: 30000 }); const ms = Date.now() - t0;
+      if (r.status !== 200 || soft404(r) || /<html/i.test(r.text.slice(0, 300))) {
+        if (p === '/llms.txt') info('llms', 'no /llms.txt (optional: a markdown index for AI agents / RAG)');
+        else if (/llms-full\.txt/.test(llmsText)) warn('llms', `/llms-full.txt is linked from /llms.txt but answers ${r.status || r.error}${r.error === 'AbortError' ? ' (no answer in 30 s — generated per request?)' : ''}`);
+        else if (llmsText) info('llms', 'no /llms-full.txt (optional: the whole site in one markdown file, for agents that read rather than crawl)');
+        continue;
+      }
+      if (p === '/llms.txt') llmsText = r.text;
+      charsetCheck(p, r);
+      const a = await llmsAudit(p, r.text, fetchLive);
+      if (/text\/html/i.test(r.headers['content-type'] || '')) a.issues.push(`served as ${r.headers['content-type']}, should be text/plain or text/markdown`);
+      let extra = '';
+      if (p === '/llms-full.txt') {
+        const cc = r.headers['cache-control'] || ''; const uncached = !cc || /no-store|no-cache|max-age=0\b|private/i.test(cc);
+        extra = ` (${Math.round(r.bytes / 1024)} KB in ${(ms / 1000).toFixed(1)} s)`;
+        if (ms > 2500) a.issues.push(`answered in ${(ms / 1000).toFixed(1)} s — built per request? agents and checkers give up; build it once or cache it at the edge${uncached ? ` (Cache-Control: ${cc || 'none'})` : ''}`);
+        else if (uncached) a.notes.push(`Cache-Control: ${cc || 'none'} — if it is generated, cache it at the edge`);
+        if (llmsText && !/llms-full\.txt/.test(llmsText)) a.notes.push('not linked from /llms.txt — agents find it by convention only');
+      }
+      llmsReport(p, a, extra);
     }
   }
 
@@ -706,6 +826,7 @@ async function liveScan(input, hop = 0) {
   if (ctx.productSite) legalLinkCheck(ctx.productSite, JSON.stringify(home.jsonld));
   ctx.platform = detectPlatform(home); if (ctx.platform) { section('Reach'); info('platform', `platform: ${ctx.platform}${home.generator ? ` (generator meta)` : ' (asset hosts)'} — hints in [brackets] point at that platform's settings`); }
   pageChecks(home, doc.url, '/');
+  orgCheck(home.jsonld);
   if (home.text.length < 200) warn('thin', '/: less than 200 characters of text in the served HTML — if the content arrives with JavaScript, crawlers see an empty page first');
 
   // inner pages from the sitemap (spread across the list), then from links if no sitemap
@@ -718,8 +839,18 @@ async function liveScan(input, hop = 0) {
   const pick = []; let nArch = 0; const maxArch = Math.floor(opt.pages / 3);
   for (let round = 0; pick.length < opt.pages && [...buckets.values()].some((a) => a.length > round); round++) for (const arr of buckets.values()) { const l = arr[round]; if (!l || pick.length >= opt.pages) continue; const isArch = INDEX_NOINDEX_RE.test(new URL(l).pathname); if (isArch && nArch >= maxArch) continue; if (isArch) nArch++; pick.push(l); }
   if (!list.length) { for (const [k, p] of ctx.linkTargets) { if (pick.length >= opt.pages) break; if (k !== normKey(doc.url) && !/\.[a-z0-9]{2,5}$/i.test(new URL(p).pathname)) pick.push(p); } }
+  // a multilingual site is sampled in pairs: each page with its alternates (the home's first), so no language is checked only by hand
+  const langs = new Set(home.hreflang.map((x) => (x.lang || '').toLowerCase()).filter((l) => l && l !== 'x-default'));
+  const multi = langs.size > 1;
+  const queue = []; const queued = new Set([normKey(doc.url)]);
+  const enqueue = (u) => { const k = normKey(u); if (queued.has(k) || queue.length >= opt.pages || !sameHost(u)) return; queued.add(k); queue.push(u); };
+  if (multi) for (const x of home.hreflang) { if ((x.lang || '').toLowerCase() === 'x-default') continue; const au = abs(x.href, doc.url); if (au) enqueue(au); }
+  const reserve = multi ? pick.slice(Math.ceil(opt.pages / 2)) : [];
+  for (const l of (multi ? pick.slice(0, Math.ceil(opt.pages / 2)) : pick)) enqueue(l);
   const fetched = new Map([[normKey(doc.url), 200]]);
-  for (const p of pick) {
+  for (let qi = 0; qi < queue.length || (multi && queue.length < opt.pages && reserve.some((l) => !queued.has(normKey(l)))); qi++) {
+    if (qi >= queue.length) { const nx = reserve.find((l) => !queued.has(normKey(l))); if (!nx) break; enqueue(nx); }
+    const p = queue[qi]; if (!p) break;
     const { final: r, chain: ch } = await follow(p); fetched.set(normKey(p), r.status);
     const path = new URL(p).pathname;
     if (r.status !== 200) { section('Reach'); fail('inner', `${path} answers ${r.status || r.error}${ch.length > 1 ? ` (via ${ch.map((c) => c.status).join('→')})` : ''} but is listed in the sitemap`); continue; }
@@ -727,6 +858,7 @@ async function liveScan(input, hop = 0) {
     if (ch.length > 1) { section('Reach'); warn('inner-redirect', `${path} redirects (${ch.map((c) => c.status).join('→')} → ${new URL(r.url).pathname}) — the sitemap should list final URLs only`); }
     const xr2 = r.headers['x-robots-tag']; if (xr2 && /noindex/i.test(xr2)) { section('Reach'); fail('x-robots', `${path}: X-Robots-Tag ${xr2} yet listed in the sitemap`); }
     const h = inspect(r.text); ctx.redirectedFrom = ch.length > 1 ? p : ''; pageChecks(h, r.url, path); ctx.redirectedFrom = '';
+    if (multi) for (const x of h.hreflang) { if ((x.lang || '').toLowerCase() === 'x-default') continue; const au = abs(x.href, r.url); if (au) enqueue(au); }
     if (h.mainText.length < 300 && !INDEX_NOINDEX_RE.test(path)) { section('Structure'); info('thin', `${path}: only ${h.mainText.length} chars of main content`); }
   }
 
@@ -788,11 +920,12 @@ async function liveScan(input, hop = 0) {
   if (pairs.length) { if (recipBad.length) fail('hreflang-recip', `hreflang not reciprocal: ${recipBad.length} pair${sfx(recipBad.length)}`, [...new Set(recipBad)].slice(0, 6).join('\n')); else pass('hreflang-recip', `hreflang reciprocal across ${Math.min(pairs.length, 24)} pair${sfx(Math.min(pairs.length, 24))}`); }
   // resource hints
   const missHint = [...ctx.externalOrigins].filter((o2) => !ctx.preconnects.has(o2)); if (missHint.length) info('preconnect', `external origins without preconnect: ${missHint.join(', ')}`);
+  langSummary();
 }
 
 // ───────────────────────────── dist mode ─────────────────────────────
 function walk(dir) { const out = []; for (const e of readdirSync(dir)) { const p = join(dir, e); const s = statSync(p); if (s.isDirectory()) out.push(...walk(p)); else out.push(p); } return out; }
-function distScan(dir) {
+async function distScan(dir) {
   ctx.mode = 'dist'; ctx.origin = opt.base || ''; ctx.https = !opt.base || /^https:/i.test(opt.base);
   const files = walk(dir); const rel = (p) => '/' + relative(dir, p).split(sep).join('/');
   const htmls = files.filter((f) => /\.html?$/i.test(f));
@@ -809,14 +942,14 @@ function distScan(dir) {
   const hidden = new Set([...routes].filter(([, f]) => /<meta[^>]+name\s*=\s*["']robots["'][^>]*noindex/i.test(readFileSync(f, 'utf8').slice(0, 20000))).map(([r]) => r));
   const robotsF = files.find((f) => rel(f) === '/robots.txt');
   let groups = [];
-  if (!robotsF) warn('robots-file', 'no robots.txt in the output — crawlers assume "allow all", but the Sitemap line has nowhere to live'); else { groups = parseRobots(readFileSync(robotsF, 'utf8')); robotsReport(groups); if (!groups.sitemaps) warn('robots-sitemap', 'robots.txt without a Sitemap: line'); }
+  if (!robotsF) warn('robots-file', 'no robots.txt in the output — crawlers assume "allow all", but the Sitemap line has nowhere to live'); else { groups = parseRobots(readFileSync(robotsF, 'utf8')); robotsReport(groups); ctx.robotsGroups = groups; if (!groups.sitemaps) warn('robots-sitemap', 'robots.txt without a Sitemap: line'); }
   const smF = files.filter((f) => /^\/sitemap[^/]*\.xml$/i.test(rel(f)));
   const smUrls = [];
   for (const f of smF) { const t = readFileSync(f, 'utf8'); for (const m of t.matchAll(/<url>([\s\S]*?)<\/url>/gi)) { const loc = m[1].match(/<loc>\s*([^<\s]+)\s*<\/loc>/i)?.[1]; const lastmod = m[1].match(/<lastmod>\s*([^<\s]+)\s*<\/lastmod>/i)?.[1]; if (loc) smUrls.push({ loc: decode(loc), lastmod }); } }
   if (!smF.length) fail('sitemap', 'no sitemap*.xml in the output');
   else if (!smUrls.length) info('sitemap', `${smF.length} sitemap file${sfx(smF.length)} but no <url> entries here (an index pointing elsewhere?)`);
   else {
-    pass('sitemap', `${smF.length} sitemap file${sfx(smF.length)}, ${smUrls.length} URLs`);
+    pass('sitemap', `${smF.length} sitemap file${sfx(smF.length)}, ${smUrls.length} URL${sfx(smUrls.length)}`);
     const paths = smUrls.map((x) => { try { return new URL(x.loc).pathname; } catch { return x.loc; } });
     const missing = paths.filter((p) => !routes.has(normPath(p)) && !routes.has(normPath(p + '/')) && !routes.has(normPath(p.replace(/\.html?$/i, '')))); if (missing.length) fail('sitemap-404', `${missing.length} sitemap URL${sfx(missing.length)} have no file in the output`, missing.slice(0, 8).join('\n'));
     if (opt.base) { const foreign = smUrls.filter((x) => { try { return new URL(x.loc).origin !== opt.base; } catch { return true; } }); if (foreign.length) fail('sitemap-host', `${foreign.length} sitemap URL${sfx(foreign.length)} not on ${opt.base}, e.g. ${foreign[0].loc}`); }
@@ -830,7 +963,16 @@ function distScan(dir) {
     if (gap.length) warn('sitemap-gap', `${gap.length} indexable HTML route${sfx(gap.length)} not in the sitemap`, gap.slice(0, 8).join('\n'));
   }
   for (const p of ['/favicon.ico', '/apple-touch-icon.png']) if (!files.some((f) => rel(f) === p)) info('icons', `${p} not in the output — devices request it blindly (404 each time)`);
-  const llms = files.find((f) => rel(f) === '/llms.txt'); if (llms) { const t = readFileSync(llms, 'utf8'); const issues = []; if (!/^#\s+\S/m.test(t)) issues.push('no H1'); const links = [...t.matchAll(/\]\(([^)\s]+)\)/g)].map((m) => m[1]); const dead = links.filter((l) => !isHttp(l) && !/^mailto:/.test(l) && !routes.has(normPath(l.split('#')[0])) && !files.some((f) => rel(f) === l.split('#')[0])).length; if (dead) issues.push(`${dead} relative link${sfx(dead)} without a file`); if (issues.length) warn('llms', `llms.txt: ${issues.join('; ')}`); else pass('llms', `llms.txt: H1, ${links.length} links`); }
+  const fileFor = (path) => routes.get(normPath(path)) || routes.get(normPath(path.replace(/\.html?$/i, ''))) || files.find((ff) => rel(ff) === path);
+  const fetchDist = async (u) => { const f = fileFor(decodeURI(new URL(u).pathname)); return f ? { status: 200, html: readFileSync(f, 'utf8') } : { status: 404 }; };
+  let llmsT = '';
+  for (const p of ['/llms.txt', '/llms-full.txt']) {
+    const f = files.find((ff) => rel(ff) === p);
+    if (!f) { if (p === '/llms-full.txt' && /llms-full\.txt/.test(llmsT)) warn('llms', '/llms-full.txt is linked from /llms.txt but is not in the output (generated at request time? check it live)'); continue; }
+    const t = readFileSync(f, 'utf8'); if (p === '/llms.txt') llmsT = t;
+    llmsReport(p, await llmsAudit(p, t, fetchDist));
+  }
+  if (llmsT) info('charset', 'llms.txt / robots.txt charset is set by the host, not the file: check it live (Content-Type needs charset=utf-8 when the text is Greek)');
 
   // pages: all of them, but only the first N verbose; the rest aggregated
   const ordered = [...routes.entries()].sort((a, b) => a[0].length - b[0].length);
@@ -867,11 +1009,156 @@ function distScan(dir) {
   if (tot('emptyAnchor')) warn('anchor-empty', `${tot('emptyAnchor')} link${sfx(tot('emptyAnchor'))} with no text, image alt or aria-label`, P.filter((p) => p.emptyAnchor).slice(0, 8).map((p) => `${p.label || p.url} (${p.emptyAnchor})`).join('\n'));
   const orphans = [...routes.keys()].filter((r) => r && r !== '/' && !linkedSet.has(r) && !/\/404(?:\.html)?$/.test(r) && !INDEX_NOINDEX_RE.test(r) && !hidden.has(r)); if (orphans.length) warn('orphan', `${orphans.length} HTML route${sfx(orphans.length)} linked from nowhere in the output (orphans)`, orphans.slice(0, 10).join('\n')); else pass('orphan', 'no orphan routes');
   if (ordered.length > sample.length) info('scope', `${ordered.length} HTML files: ${sample.length} reported in full, the rest only for failures (--pages N to widen)`);
+  if (firstHome) orgCheck(inspect(readFileSync(firstHome, 'utf8')).jsonld);
+  langSummary();
+}
+
+// ───────────────────────────── crawler logs (--logs) ─────────────────────────────
+// The scan predicts what crawlers can see; the access log says what they did. Read locally, IPs never printed.
+// [name, user-agent test, kind, robots.txt token, published IP ranges]
+const BOTS = [
+  ['Googlebot-Image', /Googlebot-Image/i, 'search', 'googlebot-image', 'https://developers.google.com/static/search/apis/ipranges/googlebot.json'],
+  ['Googlebot', /Googlebot|Google-InspectionTool/i, 'search', 'googlebot', 'https://developers.google.com/static/search/apis/ipranges/googlebot.json'],
+  ['bingbot', /bingbot|BingPreview|adidxbot/i, 'search', 'bingbot', 'https://www.bing.com/toolbox/bingbot.json'],
+  ['Applebot', /Applebot(?!-Extended)/i, 'search', 'applebot', 'https://search.developer.apple.com/applebot.json'],
+  ['DuckDuckBot', /DuckDuckBot|DuckAssistBot/i, 'search', 'duckduckbot', ''],
+  ['YandexBot', /YandexBot|YandexImages|YandexMobileBot/i, 'search', 'yandexbot', ''],
+  ['OAI-SearchBot', /OAI-SearchBot/i, 'ai-search', 'oai-searchbot', 'https://openai.com/searchbot.json'],
+  ['ChatGPT-User', /ChatGPT-User/i, 'ai-search', 'chatgpt-user', 'https://openai.com/chatgpt-user.json'],
+  ['PerplexityBot', /PerplexityBot|Perplexity-User/i, 'ai-search', 'perplexitybot', 'https://www.perplexity.ai/perplexitybot.json'],
+  ['Claude-SearchBot', /Claude-SearchBot|Claude-User/i, 'ai-search', 'claude-searchbot', ''],
+  ['GPTBot', /GPTBot/i, 'ai-training', 'gptbot', 'https://openai.com/gptbot.json'],
+  ['ClaudeBot', /ClaudeBot|anthropic-ai/i, 'ai-training', 'claudebot', ''],
+  ['CCBot', /CCBot/i, 'ai-training', 'ccbot', ''],
+  ['Bytespider', /Bytespider/i, 'ai-training', 'bytespider', ''],
+  ['Meta', /meta-externalagent|meta-externalfetcher|facebookexternalhit|facebookcatalog/i, 'preview', 'facebookexternalhit', ''],
+  ['Twitterbot', /Twitterbot/i, 'preview', 'twitterbot', ''],
+  ['LinkedInBot', /LinkedInBot/i, 'preview', 'linkedinbot', ''],
+  ['other bots', /bot\b|bot\/|crawler|spider|slurp|scrapy|python-requests|curl\/|wget|headless/i, 'other', '', ''],
+];
+const toTs = (v) => { if (v == null || v === '') return 0; if (typeof v === 'number' || /^\d+$/.test(String(v))) { const n = Number(v); return n > 1e17 ? n / 1e6 : n > 1e14 ? n / 1e3 : n > 1e11 ? n : n * 1000; } const t = Date.parse(String(v).replace(/^(\d{1,2})\/(\w{3})\/(\d{4}):/, '$1 $2 $3 ')); return isNaN(t) ? 0 : t; };
+const COMBINED = /^(?:\S+ )?(\d{1,3}(?:\.\d{1,3}){3}|[0-9a-f:]+:[0-9a-f:.]+) \S+ \S+ \[([^\]]+)\] "(\S+) (\S+)[^"]*" (\d{3}) \S+(?: "[^"]*" "([^"]*)")?/i;
+function parseLogLine(line) {
+  if (line[0] === '{') {
+    let j; try { j = JSON.parse(line); } catch { return null; }
+    const pick = (...ks) => { for (const k of ks) if (j[k] != null && j[k] !== '') return j[k]; return null; };
+    let path = pick('ClientRequestURI', 'ClientRequestPath', 'path', 'uri', 'request_uri', 'url', 'request', 'RequestURI', 'cs-uri-stem');
+    if (path && /^[A-Z]+ \S+/.test(path)) path = path.split(' ')[1];
+    if (path && /^https?:/i.test(path)) { try { const x = new URL(path); path = x.pathname + x.search; } catch { /* keep */ } }
+    return { ip: String(pick('ClientIP', 'ip', 'remote_addr', 'client_ip', 'clientIp', 'remoteAddr', 'c-ip') || ''), ts: toTs(pick('EdgeStartTimestamp', 'timestamp', 'time', '@timestamp', 'date', 'datetime', 'time_local')), path, status: Number(pick('EdgeResponseStatus', 'status', 'statusCode', 'status_code', 'response_status', 'OriginResponseStatus', 'sc-status')) || 0, ua: String(pick('ClientRequestUserAgent', 'user_agent', 'userAgent', 'ua', 'http_user_agent', 'UserAgent', 'cs(User-Agent)') || ''), host: pick('ClientRequestHost', 'host', 'Host', 'http_host', 'hostname') };
+  }
+  const m = line.match(COMBINED); if (!m) return null;
+  return { ip: m[1], ts: toTs(m[2]), path: m[4], status: Number(m[5]), ua: m[6] || '', host: null };
+}
+// IP ranges as BigInt prefixes, v4 and v6
+function ipNum(ip) {
+  ip = String(ip).trim().replace(/^\[|\]$/g, '').split('%')[0];
+  const v4 = ip.match(/^(?:::ffff:)?(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/i);
+  if (v4) { const p = v4.slice(1).map(Number); if (p.some((x) => x > 255)) return null; return { v: 4, n: BigInt(p[0]) << 24n | BigInt(p[1]) << 16n | BigInt(p[2]) << 8n | BigInt(p[3]) }; }
+  if (!ip.includes(':')) return null;
+  const [hd, tl] = ip.split('::'); const hs = hd ? hd.split(':') : []; const ts = tl === undefined ? null : tl ? tl.split(':') : [];
+  const parts = ts === null ? hs : [...hs, ...Array(Math.max(0, 8 - hs.length - ts.length)).fill('0'), ...ts]; if (parts.length !== 8) return null;
+  let n = 0n; for (const x of parts) { const v = parseInt(x || '0', 16); if (isNaN(v) || v > 0xffff) return null; n = (n << 16n) | BigInt(v); }
+  return { v: 6, n };
+}
+function parseCidr(c) { const [ip, b] = c.split('/'); const x = ipNum(ip); if (!x) return null; const width = x.v === 4 ? 32 : 128; const bits = b === undefined ? width : Number(b); return { v: x.v, bits, net: x.n >> BigInt(width - bits), width }; }
+const inRanges = (ip, ranges) => { const x = ipNum(ip); if (!x) return false; return ranges.some((r) => r.v === x.v && (x.n >> BigInt(r.width - r.bits)) === r.net); };
+async function loadRanges(url) {
+  const cache = join(tmpdir(), `senrigan-ranges-${url.replace(/[^a-z0-9]+/gi, '-').slice(-60)}.json`);
+  let data = null;
+  try { const st = statSync(cache); if (Date.now() - st.mtimeMs < 864e5) data = readFileSync(cache, 'utf8'); } catch { /* no cache */ }
+  if (!data) { const r = await get(url, { redirect: 'follow' }); if (r.status !== 200) return null; data = r.text; try { writeFileSync(cache, data); } catch { /* cache is optional */ } }
+  const out = []; const walk = (v) => { if (typeof v === 'string') { if (/^[0-9a-f.:]+\/\d{1,3}$/i.test(v)) { const c = parseCidr(v); if (c) out.push(c); } } else if (Array.isArray(v)) v.forEach(walk); else if (v && typeof v === 'object') Object.values(v).forEach(walk); };
+  try { walk(JSON.parse(data)); } catch { return null; }
+  return out.length ? out : null;
+}
+async function logsScan() {
+  section('Crawlers');
+  const files = [];
+  for (const p of opt.logs) {
+    if (!existsSync(p)) { warn('logs', `--logs ${p}: no such file or folder`); continue; }
+    if (statSync(p).isDirectory()) { for (const f of readdirSync(p)) { const fp = join(p, f); if (statSync(fp).isFile() && /\.(?:log|gz|json|jsonl|ndjson|txt)$|access/i.test(f)) files.push(fp); } }
+    else files.push(p);
+  }
+  if (!files.length) return;
+  const site = ctx.origin ? new URL(ctx.origin).hostname.replace(/^www\./, '') : '';
+  const hits = []; let lines = 0, unparsed = 0, otherHost = 0, all = 0, first = Infinity, last = 0;
+  for (const f of files) {
+    let buf; try { buf = readFileSync(f); if (buf[0] === 0x1f && buf[1] === 0x8b) buf = gunzipSync(buf); } catch (e) { warn('logs', `${f}: cannot read (${e.code || e.message})`); continue; }
+    for (const line of buf.toString('utf8').split(/\r?\n/)) {
+      if (!line.trim()) continue; lines++;
+      const e = parseLogLine(line); if (!e || !e.path) { unparsed++; continue; }
+      if (e.host && site && String(e.host).split(':')[0].replace(/^www\./, '') !== site) { otherHost++; continue; }
+      all++; if (e.ts) { first = Math.min(first, e.ts); last = Math.max(last, e.ts); }
+      const bot = BOTS.find((b) => b[1].test(e.ua)); if (!bot) continue; e.bot = bot; hits.push(e);
+    }
+  }
+  if (!lines) { warn('logs', 'the log files are empty'); return; }
+  if (unparsed / lines > 0.5) { warn('logs', `${unparsed}/${lines} log lines not understood — senrigan reads Apache/nginx "combined" lines and JSON lines (Cloudflare Logpush and similar)`); if (!all) return; }
+  const days = last > first ? Math.max(1, Math.round((last - first) / 864e5)) : 0; const day = (t) => new Date(t).toISOString().slice(0, 10);
+  // verification: a user agent is a claim, the published ranges are the proof
+  const ranges = new Map(); const noRanges = [];
+  if (opt.probe) for (const url of new Set(hits.map((h) => h.bot[4]).filter(Boolean))) { const r = await loadRanges(url); ranges.set(url, r); if (!r) noRanges.push(...new Set(hits.filter((h) => h.bot[4] === url).map((h) => h.bot[0]))); }
+  for (const h of hits) { const R = h.bot[4] ? ranges.get(h.bot[4]) : null; h.verified = R ? inRanges(h.ip, R) : null; }
+  const real = hits.filter((h) => h.verified !== false); const fakes = hits.filter((h) => h.verified === false);
+  const isAsset = (p) => /\.(?:css|js|mjs|png|jpe?g|webp|avif|gif|svg|ico|woff2?|ttf|mp4|webm|map)(?:\?|$)/i.test(p);
+  const by = new Map();
+  for (const h of real) {
+    const k = h.bot[0]; const e = by.get(k) || by.set(k, { bot: h.bot, n: 0, ok: 0, last: 0, s3: new Map(), s4: new Map(), s5: new Map(), pages: new Set(), robots: [], sitemap: 0, param: 0, archive: 0, asset: 0, blocked: new Map() }).get(k);
+    e.n++; if (h.verified) e.ok++; e.last = Math.max(e.last, h.ts);
+    const path = h.path; const bare = path.split('?')[0];
+    const bump = (m) => m.set(bare, (m.get(bare) || 0) + 1);
+    if (h.status >= 500) bump(e.s5); else if (h.status >= 400) bump(e.s4); else if (h.status >= 300) bump(e.s3);
+    if (bare === '/robots.txt') e.robots.push(h.status);
+    else if (/^\/sitemap[^/]*\.xml$/i.test(bare)) e.sitemap++;
+    else if (isAsset(path)) e.asset++;
+    else { if (h.status < 300) e.pages.add(normKey(bare)); if (path.includes('?')) e.param++; if (INDEX_NOINDEX_RE.test(path)) e.archive++; }
+    if (e.bot[3] && ctx.robotsGroups?.length && bare !== '/robots.txt' && !robotsAllows(ctx.robotsGroups, bare, e.bot[3])) bump(e.blocked);
+  }
+  const top = (m, n = 6) => [...m].sort((a, b) => b[1] - a[1]).slice(0, n).map(([p, c]) => `${p} (${c})`);
+  const sum = (m) => [...m.values()].reduce((a, b) => a + b, 0);
+  const rows = [...by.values()].sort((a, b) => b.n - a.n).map((e) => { const v = e.bot[4] ? (ranges.get(e.bot[4]) ? `${e.ok} verified` : 'unverified') : 'no published ranges'; return `${e.bot[0].padEnd(17)} ${String(e.n).padStart(6)} hits · ${v} · last ${e.last ? day(e.last) : '?'} · ${e.pages.size} pages · 3xx ${sum(e.s3)} · 4xx ${sum(e.s4)} · 5xx ${sum(e.s5)}`; });
+  info('crawlers', `${all} requests${days ? ` over ${days} day${sfx(days)} (${day(first)} → ${day(last)})` : ''}, ${hits.length} from crawlers${otherHost ? `, ${otherHost} for other hosts skipped` : ''}`, rows.join('\n') || 'no crawler requests');
+  if (noRanges.length) info('crawl-verify', `could not download the published ranges for ${[...new Set(noRanges)].join(', ')} — their counts are claims, not verified`);
+  // search engines
+  const G = by.get('Googlebot'), B = by.get('bingbot');
+  const absent = [!G && 'Googlebot', !B && 'bingbot'].filter(Boolean);
+  if (absent.length) (days >= 7 ? warn : info)('crawl-none', `no ${absent.join(' and no ')} request in ${days || 'the'} day${sfx(days)} of logs${days < 7 ? ' — a short window; take a week or more' : ' — the engine is not visiting: check the property in its webmaster console, the sitemap submission, and that robots.txt and the firewall let it in'}`);
+  const engines = [G, B].filter(Boolean);
+  if (engines.length && ctx.sitemapUrls.size) {
+    const seen = new Set(engines.flatMap((e) => [...e.pages]));
+    const optedOut = new Set(ctx.pages.filter((p) => p.noindex && p.url).map((p) => normKey(p.url)));
+    const gap = [...ctx.sitemapUrls].filter((k) => !seen.has(k) && !optedOut.has(k));
+    if (days < 7) info('crawl-gap', `${gap.length}/${ctx.sitemapUrls.size} sitemap URLs not fetched by ${engines.map((e) => e.bot[0]).join(' or ')} — the log covers ${days || 'under one'} day${sfx(days)}, too short to call it a gap`);
+    else if (gap.length) (gap.length / ctx.sitemapUrls.size > 0.2 ? warn : info)('crawl-gap', `${gap.length}/${ctx.sitemapUrls.size} sitemap URLs fetched by neither Googlebot nor bingbot in ${days} days — new, weakly linked or judged not worth a visit; inspect them in Search Console`, gap.slice(0, 8).join('\n'));
+    else pass('crawl-gap', `every sitemap URL fetched by a search engine in ${days} days`);
+  }
+  for (const e of engines) {
+    const name = e.bot[0];
+    if (e.robots.some((st) => st >= 500)) fail('crawl-robots', `${name} got ${e.robots.filter((st) => st >= 500).length}× a server error on /robots.txt — Google stops crawling the whole site while robots.txt fails`);
+    else if (!e.robots.length && days >= 2) info('crawl-robots', `${name} never fetched /robots.txt in ${days} days (it usually does daily) — is robots.txt served to it, or cached by a rule?`);
+    if (sum(e.s5)) warn('crawl-5xx', `${name} got ${sum(e.s5)} server error${sfx(sum(e.s5))} — engines slow their crawl when a site errors`, top(e.s5).join('\n'));
+    if (sum(e.s4)) warn('crawl-404', `${name} got ${sum(e.s4)} 4xx on ${e.s4.size} path${sfx(e.s4.size)} — old URLs or links that still point there: redirect each to its closest page, or answer 410 if it is gone`, top(e.s4).join('\n'));
+    if (sum(e.s3) / e.n > 0.1) warn('crawl-redirect', `${name}: ${Math.round(sum(e.s3) / e.n * 100)}% of its requests hit a redirect — links, sitemap or canonicals point at addresses that move`, top(e.s3).join('\n'));
+    const pagesHits = e.n - e.asset - e.robots.length - e.sitemap;
+    if (pagesHits > 20 && (e.param + e.archive) / pagesHits > 0.3) warn('crawl-budget', `${name}: ${Math.round((e.param + e.archive) / pagesHits * 100)}% of its page requests go to parameters or tag / archive pages — the crawl budget goes there instead of the content`);
+    const noidx = ctx.pages.filter((p) => p.noindex && p.url && e.pages.has(normKey(p.url))).map((p) => p.label); if (noidx.length) info('crawl-noindex', `${name} keeps fetching ${noidx.length} noindex page${sfx(noidx.length)} the scan saw: ${noidx.slice(0, 5).join(', ')} — fine; drop links to them if they are not meant to be found`);
+  }
+  if (!engines.some((e) => e.sitemap) && engines.length && days >= 7) info('crawl-sitemap', 'no search engine fetched the sitemap in the period — submit it in Search Console and Bing Webmaster Tools; the robots.txt line alone is read slowly');
+  // AI and other crawlers: who ignores robots.txt, who pretends
+  for (const e of by.values()) {
+    if (!/^ai-|preview/.test(e.bot[2]) || !e.blocked.size) continue;
+    warn('crawl-ignores-robots', `${e.bot[0]}: ${sum(e.blocked)} request${sfx(sum(e.blocked))} to paths robots.txt disallows for it — robots.txt is a request, not a lock: block it at the edge (a WAF rule on the user agent)`, top(e.blocked).join('\n'));
+    KEKKAI(`crawlers: ${e.bot[0]} fetches paths robots.txt disallows — an edge rule is the only enforcement`);
+  }
+  const fakeSearch = fakes.filter((h) => h.bot[2] === 'search');
+  if (fakes.length) { (fakeSearch.length ? warn : info)('crawl-impostor', `${fakes.length} request${sfx(fakes.length)} claim to be ${[...new Set(fakes.map((h) => h.bot[0]))].join(', ')} from addresses outside the published ranges — scrapers in disguise, not the engine`); KEKKAI('crawlers: requests faking search-engine user agents — bot management or rate limits at the edge'); }
 }
 
 // ───────────────────────────── run ─────────────────────────────
 const isDir = !/^https?:\/\//i.test(target) && existsSync(target) && statSync(target).isDirectory();
-if (isDir) distScan(target); else await liveScan(target);
+if (isDir) await distScan(target); else await liveScan(target);
+if (opt.logs.length) await logsScan();
 
 // ── markup grade for the site: median of the scanned pages, worst pages named
 const markupSite = (() => {
@@ -915,7 +1202,7 @@ const labelOf = (r) => { const l = r.msg.match(/^(\/\S*): /)?.[1] ?? null; retur
       const n = g.pages.size; if (n < 3 || n < Math.ceil(nPages * 0.6)) continue;
       g.idx.forEach((i) => drop.add(i));
       const raw = g.first.msg.replace(/^\/\S*: /, '');
-      const GENERIC = { thin: 'thin main content (under 300 chars)', 'img-lazy': 'images without loading="lazy"', 'img-decoding': 'images without decoding="async"', 'og-type': 'no og:type', 'og-image-alt': 'no og:image:alt', twitter: 'no twitter:card', lang: 'lang attribute set', viewport: 'viewport ok', title: 'title within 15–60 chars', description: 'description within 50–160 chars', canonical: 'canonical self-referencing', noindex: 'indexable', hreflang: 'hreflang set present', h1: 'one <h1>', 'h-order': 'heading levels descend without jumps', 'img-alt': 'every <img> carries alt', jsonld: 'JSON-LD present', og: 'og:title / description / image / url present', breadcrumb: 'BreadcrumbList valid', dom: 'DOM size within limits', img: 'no <img> in the body' };
+      const GENERIC = { thin: 'thin main content (under 300 chars)', 'img-lazy': 'images without loading="lazy"', 'img-decoding': 'images without decoding="async"', 'og-type': 'no og:type', 'og-image-alt': 'no og:image:alt', twitter: 'no twitter:card', lang: 'lang attribute set', viewport: 'viewport ok', title: 'title within 15–60 chars', description: 'description within 50–160 chars', canonical: 'canonical self-referencing', noindex: 'indexable', hreflang: 'hreflang set present', h1: 'one <h1>', 'h-order': 'heading levels descend without jumps', 'img-alt': 'every <img> carries alt', jsonld: 'JSON-LD present', og: 'og:title / description / image / url present', breadcrumb: 'BreadcrumbList valid', dom: 'DOM size within limits', img: 'no <img> in the body', 'title-short': 'short titles (under 30 chars)', 'description-short': 'descriptions under 110 chars', 'img-alt-empty': 'content images with alt=""', 'img-alt-hidden': 'alt="" images inside aria-hidden' };
       const soft = g.first.level === 'pass' || g.first.level === 'info';
       const msg = soft ? (GENERIC[g.first.id] || raw.replace(/:\s*".*$/, '').replace(/\s*\(.*?\)\s*$/, '').replace(/\b\d+(?:\/\d+)?\s*/g, '').replace(/\s{2,}/g, ' ').trim()) : `e.g. ${raw}`;
       const pagesList = [...g.pages];
@@ -929,8 +1216,8 @@ const labelOf = (r) => { const l = r.msg.match(/^(\/\S*): /)?.[1] ?? null; retur
 //   INVISIBLE — the site or the page cannot enter the index (or tells the engine another URL is the real one)
 //   DILUTED   — it can be indexed, but its signals are split, contradictory or lost
 //   DEGRADED  — it is indexed as it is, but shown worse than it could be
-const INVISIBLE = new Set(['fetch', 'status', 'robots', 'x-robots', 'noindex', 'canonical-file', 'canonical-redirect', 'hreflang-file', 'sitemap-robots', 'inner', 'sitemap-404', 'sitemap-host']);
-const DILUTED = new Set(['canonical-host', 'link-redirect', 'robots-default-deny', 'jsonld-product', 'alias', 'https', 'canonical', 'canonical-slash', 'canonical-html', 'title-dup', 'description-dup', 'hreflang', 'hreflang-recip', 'lang', 'lang-script', 'h1', 'h-empty', 'slash', 'sitemap', 'sitemap-slash', 'sitemap-scheme', 'sitemap-gap', 'inner-redirect', 'broken', 'orphan', 'nofollow', 'nofollow-meta', 'mixed', 'jsonld-syntax', 'jsonld-context', 'jsonld-h1', 'jsonld-article', 'jsonld-legal', 'terms-link', 'og-url', 'thin', 'fake-link']);
+const INVISIBLE = new Set(['crawl-robots', 'fetch', 'status', 'robots', 'x-robots', 'noindex', 'canonical-file', 'canonical-redirect', 'hreflang-file', 'sitemap-robots', 'inner', 'sitemap-404', 'sitemap-host']);
+const DILUTED = new Set(['crawl-none', 'crawl-gap', 'crawl-404', 'crawl-5xx', 'crawl-redirect', 'crawl-budget', 'canonical-host', 'link-redirect', 'robots-default-deny', 'jsonld-product', 'alias', 'https', 'canonical', 'canonical-slash', 'canonical-html', 'title-dup', 'description-dup', 'hreflang', 'hreflang-recip', 'lang', 'lang-script', 'h1', 'h-empty', 'slash', 'sitemap', 'sitemap-slash', 'sitemap-scheme', 'sitemap-gap', 'inner-redirect', 'broken', 'orphan', 'nofollow', 'nofollow-meta', 'mixed', 'jsonld-syntax', 'jsonld-context', 'jsonld-h1', 'jsonld-article', 'jsonld-legal', 'terms-link', 'og-url', 'thin', 'fake-link']);
 const tierOf = (r) => (r.level === 'pass' || r.level === 'info') ? '' : INVISIBLE.has(r.id) && !(r.id === 'noindex' && r.level === 'warn' && !/sitemap/.test(r.msg)) ? 'INVISIBLE' : DILUTED.has(r.id) ? 'DILUTED' : 'DEGRADED';
 for (const r of results) r.tier = tierOf(r);
 const tiers = { INVISIBLE: 0, DILUTED: 0, DEGRADED: 0 }; for (const r of results) if (r.tier) tiers[r.tier]++;
@@ -994,5 +1281,9 @@ function render(fmt, color) {
 }
 const jsonOut = () => JSON.stringify({ target, mode: isDir ? 'dist' : 'live', counts, tiers, markup: markupSite, ok: !failed, kekkai: ctx.kekkai, results }, null, 2);
 if (opt.json) console.log(jsonOut()); else console.log(render('text', process.stdout.isTTY));
-if (opt.out) { const { writeFileSync } = await import('node:fs'); writeFileSync(opt.out, opt.out.endsWith('.json') ? jsonOut() : opt.out.endsWith('.md') ? render('md', false) : render('text', false)); console.error(`report written to ${opt.out}`); }
+if (opt.out) {
+  const { resolve } = await import('node:path'); const where = resolve(opt.out);
+  try { writeFileSync(opt.out, opt.out.endsWith('.json') ? jsonOut() : opt.out.endsWith('.md') ? render('md', false) : render('text', false)); console.error(`report written to ${where}`); }
+  catch (e) { console.error(`could not write the report to ${where} (${e.code || e.message}) — the folder does not exist or is not writable; pass --out with a full path, e.g. --out %USERPROFILE%\\Documents\\senrigan.md`); }
+}
 process.exit(failed ? 1 : 0);

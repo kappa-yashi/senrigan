@@ -194,6 +194,13 @@ Images:
 - `alt` on every `<img>`. Descriptive for content images (what the picture
   shows, not the filename); `alt=""` for decoration. Image search indexes
   alt text; screen readers read it.
+- `alt=""` is a statement — "this picture says nothing" — and it is often
+  wrong. A product photo in a slider, a thumbnail that is the whole link to
+  the cart, the drawing that shows how to take a measurement: content, with
+  an empty alt. The test: if the image disappeared, would the reader lose
+  information or lose the name of a link? Then it needs words. An image that
+  is the only thing inside a link gives the link its name; with `alt=""` the
+  link is announced by its URL, or by a stray number next to it.
 - `width` and `height` on every `<img>` — the browser reserves the box, no
   layout shift. The image pipeline knows the dimensions; emit them.
 - `loading="lazy" decoding="async"` below the fold; the hero stays eager,
@@ -275,6 +282,24 @@ What the scanner checks, and why:
 - **Breadcrumbs**: positions from 1, `name` everywhere, `item` on every
   element but the last.
 
+**The brand as an entity** — the home page's `Organization` (or the
+business type, or `Person` for a personal site) is how the knowledge graph
+knows *who* the site is. `name` and `url` make it a node; `description`,
+`logo` and above all `sameAs` — the social profiles, the directory and
+marketplace listings — make it *this* node and not the next brand with a
+similar name. For a new name, or one close to others, add
+`disambiguatingDescription`: one plain line that says what it is and what it
+is not.
+
+```json
+{ "@type": "Organization", "@id": "https://www.example.com/#org",
+  "name": "alcyeon", "url": "https://www.example.com/",
+  "logo": "https://www.example.com/logo.png",
+  "description": "…",
+  "disambiguatingDescription": "Greek textile brand, not the Alcyon shipping company",
+  "sameAs": ["https://www.instagram.com/…", "https://www.facebook.com/…"] }
+```
+
 **Open Graph / Twitter** — `og:title`, `og:description`, `og:image`
 (absolute `https`, 1200×630, with `og:image:alt`), `og:url` equal to the
 canonical, `og:type`, `og:locale`; `twitter:card` (`summary_large_image`
@@ -349,9 +374,32 @@ sheet. A 404 on each is silent and constant. Ship them, plus
 
 **llms.txt** (optional) — a markdown index for AI agents: an H1, a
 blockquote summary, sections of links with one-line descriptions, served as
-`text/plain` or `text/markdown`. `llms-full.txt` is the same with the
-content inlined. If you ship them, keep the links alive; the scanner HEADs
-them.
+`text/plain` or `text/markdown` **with `charset=utf-8`** (without it a
+browser shows Greek as mojibake, and so do some readers). `llms-full.txt` is
+the same with the content inlined. Both go stale quietly: a renamed page, a
+removed product, a `#section` that no longer exists. Generate them from the
+same source as the sitemap, at build, rather than by hand; the scanner
+follows every link, checks every `#fragment` against the page's ids and
+compares the pages with the sitemap. An `llms-full.txt` built per request
+from a backend is slow — agents and checkers give up after a few seconds —
+so build it at deploy or cache it at the edge.
+
+On Cloudflare Pages / Netlify the charset is a `_headers` rule:
+
+```
+/llms.txt
+  Content-Type: text/plain; charset=utf-8
+/llms-full.txt
+  Content-Type: text/plain; charset=utf-8
+```
+
+**Access logs** — the scan says what the crawlers *can* see; the log says
+what they *did*. `senrigan <site> --logs access.log` adds who came (each
+hit checked against the published IP ranges, so a fake Googlebot is
+counted apart), which sitemap URLs no engine fetched, and which errors and
+redirects they keep hitting. A static host often has no raw log on its free
+plan; a cPanel host has one under "Raw Access", nginx and Apache write
+*combined* lines, Cloudflare exports JSON lines through Logpush.
 
 ---
 
@@ -421,3 +469,5 @@ What the grade looks at, and what to do on a page builder:
 - [ ] share one URL in a chat app and look at the card
 - [ ] Search Console: request indexing for changed URLs; read coverage in a
       week
+- [ ] where there is an access log: `senrigan https://host --logs <log>`
+      after a week or more — did the engines come, and what did they miss?

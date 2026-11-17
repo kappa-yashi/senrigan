@@ -64,18 +64,32 @@ or clone and run `node bin/senrigan.mjs <target>`.
 - `favicon.ico`, `apple-touch-icon.png`, declared icons and the web manifest
   answer 200 (devices request them blindly; each 404 is wasted crawl)
 - the home document's size (a multi-megabyte HTML page is reported)
-- `llms.txt` / `llms-full.txt` when present: H1, summary blockquote, links
-  resolve, served as text
+- `llms.txt` / `llms-full.txt` read **against the site**: H1, summary
+  blockquote, served as text with `charset=utf-8` when the text is not ASCII
+  (Greek turns to mojibake without it); every link answers 200 at its own
+  address (dead links and links through a redirect are listed), every
+  `#fragment` points at an element that exists, every page it names is in
+  the sitemap; how many sitemap URLs it names and which sections it never
+  mentions. `llms-full.txt`: probed, its size and response time measured, a
+  slow or uncached one reported (generated per request: build it once or
+  cache it at the edge), and whether `llms.txt` links to it
+- `robots.txt` with non-ASCII text and no charset
 
 **Layer 1 — head & rendering** (every scanned page)
 
 - `<html lang>` present and a BCP 47 tag, agreeing with the page's own
   hreflang entry
 - viewport with `width=device-width`, no zoom blocking
-- `<title>`: present, 15–60 characters, unique across the scanned pages
+- `<title>`: present, 15–60 characters and under ~600 px wide (Google cuts
+  by width; capitals and Greek run wide), unique across the scanned pages;
+  under 30 characters is a note, not a warning
   (the two language versions of one page, tied by hreflang, are not
   duplicates of each other)
-- meta description: present, ≤160 characters, unique (same rule)
+- meta description: present, ≤160 characters, unique (same rule); under 110
+  is a note — room the snippet does not use
+- on a multilingual site the sample is taken in pairs — each page with its
+  hreflang alternates, the home's first — and a line sums up the findings
+  per language
 - canonical: present, absolute, `https`, same host, self-referencing; a
   canonical that points at a **file** (an image URL pasted into the SEO
   field) is a failure, and so is a canonical that names a URL which
@@ -104,9 +118,14 @@ or clone and run `node bin/senrigan.mjs <target>`.
   that is a whole sentence (the first paragraph put in the heading) is flagged
 - DOM size against the Lighthouse limits (1 500 nodes, depth 32) — a
   warning, never the verdict
-- images: missing `alt` is a failure (`alt=""` for decorative images is
-  accepted); missing `width`/`height` (layout shift); `loading="lazy"` and
-  `decoding="async"` counts
+- images: missing `alt` is a failure. `alt=""` is right for decoration and
+  wrong for content, so each empty alt is judged by what surrounds it: the
+  only content of a link or button (which is then left without a name),
+  200 px or wider, inside a `<figure>`, or the image the page's JSON-LD names
+  — those are reported; inside `aria-hidden` / `role="presentation"` it is a
+  note (right for assistive tech, invisible to Google Images). Missing
+  `width`/`height` (layout shift); `loading="lazy"` and `decoding="async"`
+  counts
 - internal links that disagree with the canonical trailing-slash policy
   (each one is a redirect hop)
 - pages with almost no text in the served HTML (content that arrives with
@@ -134,6 +153,12 @@ or clone and run `node bin/senrigan.mjs <target>`.
 - a page that looks like an article (blog path, or a single `<article>` with
   a `<time>`) but carries no `Article`/`BlogPosting` type — unless it already
   declares another main entity (a `SoftwareApplication`, an `Event`, a room…)
+  or is a policy page (terms, privacy, shipping, returns…: an `<article>` with
+  a "last updated" date is still a `WebPage`)
+- the brand as an entity: the home page's `Organization` (or business, or
+  `Person`) needs `description`, `sameAs` (its social and directory profiles —
+  how the knowledge graph tells this brand from every other with a similar
+  name), `url` and `logo`; `disambiguatingDescription` is suggested
 - `Product` declared next to a business (`Hotel`, `Restaurant`, a
   `…Service`): Product is for goods that are bought; the business and what it
   offers have their own types (`HotelRoom`, `Offer`, `Menu`, `Service`,
@@ -212,6 +237,29 @@ pointing at that platform's setting — `[Webflow: Site settings → SEO →
 "Global canonical tag URL"]`. Greek and Latin-1 named entities
 (`&alpha;&beta;`) are decoded, so headings on page-builder sites read as text.
 
+**Crawlers** (`--logs`, with a live scan or a `dist/` folder)
+
+The scan predicts what crawlers can see; the access log says what they did.
+`--logs <file|folder>` (repeatable) reads Apache/nginx *combined* lines and
+JSON lines (Cloudflare Logpush and similar field names), plain or `.gz`:
+
+- a table per crawler — Googlebot, bingbot, Applebot, DuckDuckBot, Yandex,
+  OAI-SearchBot, ChatGPT-User, PerplexityBot, GPTBot, ClaudeBot, CCBot,
+  Bytespider, the link-preview fetchers — with hits, last visit, pages, 3xx /
+  4xx / 5xx
+- **verification**: a user agent is a claim. Where the engine publishes its
+  IP ranges (Google, Bing, Apple, OpenAI, Perplexity) each hit is checked
+  against them (downloaded once a day, cached); requests that claim to be
+  Googlebot from elsewhere are counted as impostors and handed to kekkai
+- Googlebot or bingbot absent; sitemap URLs neither fetched in the period
+  (a week or more of log); a server error on `robots.txt` (Google stops
+  crawling); 4xx, 5xx and redirects the engines keep hitting, with paths;
+  crawl spent on parameters and tag pages; the sitemap never fetched
+- AI and preview crawlers that fetch paths `robots.txt` disallows for them —
+  robots.txt is a request, the edge is the lock (hand-off to kekkai)
+
+The log is read locally; IP addresses are never printed, only counts.
+
 **Report layout**
 
 The text and markdown reports print the site first — every site-wide finding
@@ -232,7 +280,11 @@ line per warning or failure, sorted by tier.
 --no-probe          live: skip icon / llms.txt / manifest probes and the link HEADs
 --base <url>        dist: the public origin, so absolute URLs can be judged
 --dist              force dist mode for a folder
+--logs <file|dir>   crawler access logs (combined / JSON lines, .gz ok), repeatable
 ```
+
+A report that cannot be written (`--out` into a folder that does not exist
+or is not writable) is reported as such; the scan's exit code is unchanged.
 
 Exit code 0 = sight clear, 1 = sight obscured, 2 = usage. `--summary` sorts
 by tier; `--json` carries `tiers` and the `kekkai` hand-offs.
@@ -268,12 +320,13 @@ writes the templates, human or assistant, before the first page);
 
 - It reads the HTML that is served. It does not execute JavaScript, so
   client-rendered content is invisible to it — as it is, at first, to most
-  crawlers.
+  crawlers. Every live report says so in one line: images a script adds (a
+  gallery, a hover trail, a popup built in the browser) are not checked.
 - It does not measure rankings, traffic, Core Web Vitals in the field or
   anything Search Console knows. Run it before deploy; read Search Console
   after.
-- Title and description lengths are character counts; Google truncates by
-  pixel width.
+- Title width is an estimate (Arial at the size Google uses); description
+  lengths are character counts.
 - Keyword analysis is a heuristic, with a simple Greek stemmer; it points,
   it does not judge.
 - Only scan sites you own or are allowed to test.

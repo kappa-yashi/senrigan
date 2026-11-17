@@ -75,6 +75,8 @@ help from the rest of the site.
 
 ## DO — site-wide files
 
+- The home page's `Organization` (or business / `Person`) with `name`,
+  `url`, `logo`, `description` and `sameAs` (every official profile).
 - `robots.txt` with a `Sitemap:` line carrying the absolute sitemap URL.
   Block crawling only of what must not be fetched; never `Disallow` an
   admin path (that is kekkai's rule, it holds here too). Default allow
@@ -150,7 +152,11 @@ help from the rest of the site.
 - No `rel="nofollow"` on your own links, no `nofollow` in the robots meta
   of indexable pages.
 - No `http://` anywhere in the output.
-- No images without dimensions; no `alt` that repeats the filename.
+- No images without dimensions; no `alt` that repeats the filename; no
+  `alt=""` on a content image (a product photo, the only thing inside a
+  link, a diagram) — empty alt is for decoration only.
+- No `llms.txt` written by hand and left to go stale: generate it with the
+  sitemap; serve text files with `charset=utf-8`.
 - No `rel="next"`/`prev` as the only pagination signal: pages 2+ need real
   links in the HTML.
 - No structured data for things not on the page (reviews, FAQs, events

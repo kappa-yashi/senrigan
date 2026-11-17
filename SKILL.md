@@ -54,6 +54,13 @@ description — rather than dropping the check.
    the report. A local preview (`http://127.0.0.1:…`) works: production
    URLs found in the sitemap and hreflang are fetched from the local server.
 
+   If the user has access logs (cPanel "raw access", nginx, a Cloudflare
+   Logpush export), add `--logs <file|folder>`: the report gains a
+   **Crawlers** section — who actually came, verified against the engines'
+   published IP ranges, what they never fetched and where they hit errors.
+   The log is read locally and IPs are never printed; still ask before
+   reading a client's logs.
+
    If the skill was installed without the script, fetch it from
    `https://github.com/kappa-yashi/senrigan` (`bin/senrigan.mjs`, zero
    dependencies) or run `npx github:kappa-yashi/senrigan <target>`.
@@ -95,7 +102,8 @@ description — rather than dropping the check.
    deploy, run the live scan again; then request indexing for the changed
    URLs and read the coverage report a few days later. The scanner says
    what the page tells the crawler; Search Console says what the crawler did
-   with it.
+   with it. With `--logs`, the access log says it too, without waiting for the
+   console.
 
 ## How to read the important findings
 
@@ -119,7 +127,7 @@ description — rather than dropping the check.
 | canonical is a URL that redirects here | `/human` declared, `/human/` served (or `.html` vs clean URL) — the canonical never answers 200 | align canonical, sitemap and links with what the host actually serves |
 | `lang` disagrees with the title's script | language declared wrong, or a title copied across languages | lang from the route; translate the title |
 | `<h1>` is a sentence | the first paragraph sits in the heading | the name of the thing in the `<h1>`, the sentence in a `<p>` |
-| article page without Article schema | the page's JSON-LD is only the business entity | add `BlogPosting`/`Article` with headline = h1, dates, author, image (not reported when the page already declares another main entity, such as software or an event) |
+| article page without Article schema | the page's JSON-LD is only the business entity | add `BlogPosting`/`Article` with headline = h1, dates, author, image (not reported when the page already declares another main entity, such as software or an event); policy pages with a "last updated" date are not articles) |
 | N/N pages: … — site-wide | the template, not the pages | fix it once; the bracketed hint names the platform setting |
 | `noindex` yet listed in the sitemap | you ask for indexing and refuse it in the same breath | drop it from the sitemap, or remove the noindex |
 | utility page indexable | `/search`, `/version`, `/404` compete with real pages | `noindex, follow` in the template |
@@ -132,6 +140,15 @@ description — rather than dropping the check.
 | 2 `<h1>` / no `<h1>` / h1→h3 jump | the heading skeleton is the outline crawlers and screen readers use | one `<h1>` in the template; content starts at `##`; UI labels are not headings |
 | empty heading tag | an outline entry with no text | remove it or give it text |
 | `<img>` without alt | invisible to image search and to screen readers | descriptive `alt`; `alt=""` for decoration |
+| `<img alt="">` that looks like content | the only thing in a link (the link has no name), wide, in a `<figure>`, or the image the JSON-LD names — skipped by screen readers and Google Images | describe it; keep `alt=""` only for decoration. Images a script adds are not seen at all |
+| llms.txt: dead / redirecting links, #fragment pointing at nothing, page not in the sitemap | the index for agents is stale — it sends them to pages that changed | regenerate it from the same content source as the sitemap; anchors from real ids |
+| text file without charset=utf-8 | Greek in llms.txt / robots.txt shows as mojibake | `Content-Type: text/plain; charset=utf-8` (a `_headers` rule on static hosts) |
+| llms-full.txt slow or uncached | generated per request; agents and checkers time out | build it at deploy, or cache it at the edge |
+| title wider than ~600 px | cut in results although under 60 characters | shorter brand suffix, sentence case |
+| Organization without description / sameAs | the brand cannot be told apart from similar names | description, sameAs (social + directory profiles), logo, url; disambiguatingDescription for a new or confusable name |
+| Crawlers: Googlebot / bingbot absent, sitemap URLs never fetched | the engine is not visiting what the site declares | Search Console / Bing Webmaster: property, sitemap submission, URL inspection; check robots and the firewall |
+| Crawlers: 4xx / 5xx / redirects the engines keep hitting | crawl spent on dead or moving addresses | redirect old URLs to their closest page or 410; fix the links and sitemap that point there |
+| Crawlers: AI bot ignores robots.txt, impostor Googlebot | robots.txt is a request, not a lock | edge rules — hand over to kekkai |
 | `<img>` without width/height | layout shift | dimensions from the image pipeline |
 | internal links disagree with the slash policy | every click is a 301/308 first | normalise links at build; a lint in the content |
 | broken internal link | a dead end for crawlers and readers | fix or remove; dist mode finds them before deploy |
