@@ -146,6 +146,10 @@ help from the rest of the site.
 - No `<meta name="robots" content="noindex">` on templates shared by
   content pages "just for now".
 - No sitemap entries for redirects, 404s, noindex pages, staging hosts.
+- No 302 / 307 between hosts or from http: host and scheme redirects are
+  301 / 308, `www` primary.
+- No client-rendered pages: a single-page app ships every route prerendered.
+- No headings typed in capitals: sentence case, `text-transform` in CSS.
 - No `Disallow: /` left over from staging, and no default-deny template
   (`Disallow: /` under `*` with the engines allowed by name): it also shuts
   out ChatGPT search, Apple, DuckDuckGo and every link preview.

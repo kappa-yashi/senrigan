@@ -149,6 +149,10 @@ function inspect(html) {
   const mainM = clean.match(/<main\b[^>]*>([\s\S]*?)<\/main>/i) || clean.match(/<article\b[^>]*>([\s\S]*?)<\/article>/i);
   o.hasMain = !!mainM; o.articleTag = (clean.match(/<article\b/gi) || []).length === 1;
   for (const u of [...o.scriptSrcs, ...o.styleHrefs, ...o.images.map((i) => i.src)]) { try { if (isHttp(u)) o.assetHosts.add(new URL(u).host); } catch { /* ignore */ } }
+  // single-page apps: an empty mount node means the served HTML has no content; Lovable / Vite leave their own traces
+  o.emptyRoot = /<div\s+id=["']?(?:root|app|__next|svelte)["']?[^>]*>\s*<\/div>/i.test(html);
+  o.lovable = /lovable-uploads|gpteng\.co|lovable\.(?:app|dev)|data-lov-id|content=["']Lovable/i.test(html);
+  o.vite = /<script[^>]+type=["']module["'][^>]*src=["'][^"']*\/assets\/index-[\w-]+\.js/i.test(html);
   if (/\/wp-content\//.test(html)) o.assetHosts.add('wp-content'); if (/\/_astro\//.test(html)) o.assetHosts.add('_astro'); if (/\/_next\//.test(html)) o.assetHosts.add('_next');
   const noChrome = (mainM ? mainM[1] : clean).replace(/<(nav|header|footer|aside|form)\b[\s\S]*?<\/\1>/gi, '');
   o.mainText = stripTags(noChrome); o.text = stripTags(clean);
@@ -275,12 +279,16 @@ function detectPlatform(h) {
   if (/squarespace/.test(g) || /squarespace-cdn/.test(hosts)) return 'Squarespace';
   if (/shopify/.test(g) || /cdn\.shopify/.test(hosts)) return 'Shopify';
   if (/framer/.test(g) || /framerusercontent/.test(hosts)) return 'Framer';
+  if (h.lovable) return 'Lovable';
   if (/astro/.test(g) || /_astro/.test(hosts)) return 'Astro';
   if (/next\.js/.test(g) || /_next/.test(hosts)) return 'Next.js';
+  if (h.vite) return 'Vite SPA';
   if (/hugo|gatsby|jekyll|eleventy|nuxt|sveltekit/.test(g)) return g.match(/hugo|gatsby|jekyll|eleventy|nuxt|sveltekit/)[0].replace(/^./, (c) => c.toUpperCase());
   return '';
 }
 const HINTS = {
+  Lovable: { 'spa-empty': 'Lovable builds a client-rendered Vite + React app: add a prerender step that writes every route as HTML at build, or host it where SSR / prerendering runs', 'host-redirect': 'the custom-domain redirect comes from the hosting platform; if it cannot be set to 301 there, a proxy in front (a Cloudflare redirect rule) can answer 301 instead', 'img-alt-empty': 'images placed by the AI builder often get alt="": ask it for alt from the image content, and for video thumbnails the video title' },
+  'Vite SPA': { 'spa-empty': 'a Vite SPA renders in the browser: prerender every route at build (SSG) or move to SSR' },
   Webflow: { canonical: 'Site settings → SEO → "Global canonical tag URL" emits it on every page', icons: 'Webflow serves favicon/webclip via <link> only; the blind /favicon.ico request 404s unless you add a redirect', og: 'Page settings → Open Graph; og:url is not emitted by default', lang: 'Site settings → General → Language', h1: 'a heading styled as H1 is still an H1 — restyle with a class, keep one H1 element per page' },
   Wix: { noindex: 'Pages → page → SEO basics → "Let search engines index this page"', description: 'Wix auto-fills the description from page text when the field is empty — write one', canonical: 'Site languages: the primary language should serve at the root and canonicalise to itself', 'h-first': 'theme text styles map to h6 for small text — change the text style, not the content', dom: 'Wix markup is deep by construction; nothing to fix here' },
   WordPress: { title: 'the SEO plugin title template appends the site name + tagline — shorten the template', h1: 'page builders split one headline into two heading blocks — make the second a paragraph', 'img-dim': 'the media library knows the dimensions; a lazy-load plugin or theme filter is stripping them' },
@@ -364,7 +372,7 @@ function pageChecks(h, pageUrl, label) {
     const px = pxWidth(h.title);
     if (n > 60) warn('title', `${L}title is ${n} chars — likely truncated in results: "${h.title.slice(0, 70)}…"${H('title')}`);
     // Google cuts by width, not by count: capitals and Greek run wide, so 55 characters can already overflow
-    else if (px > 600) warn('title', `${L}title is ${n} chars but about ${px} px wide — Google cuts near 580–600 px: "${h.title}"`);
+    else if (px > 600) warn('title-width', `${L}title is ${n} chars but about ${px} px wide — Google cuts near 580–600 px: "${h.title}"`);
     const greek = (h.title.match(/[\u0370-\u03ff]/g) || []).length, latin = (h.title.match(/[a-z]/gi) || []).length;
     if (h.lang && !/^el/i.test(h.lang) && greek > latin) warn('lang-script', `${L}<html lang="${h.lang}"> but the title is Greek — the page language is declared wrong, or the title was copied from the other language`); else if (n < 15) warn('title', `${L}title is only ${n} chars: "${h.title}"`); else if (n <= 60 && px <= 600) { pass('title', `${L}title ${n} chars: "${h.title}"`); if (n < 30) info('title-short', `${L}title is short (${n} chars) — fine when the page is simple; otherwise room for what the page offers and to whom`); }
     const prev = ctx.titles.get(h.title); if (prev && prev !== selfKey) (isAlt(prev) ? info('title-alt', `${L}same title as its hreflang alternate ${prev} — not a duplicate; translate it when you can`) : warn('title-dup', `${L}title duplicates ${prev}`)); else ctx.titles.set(h.title, selfKey);
@@ -393,6 +401,8 @@ function pageChecks(h, pageUrl, label) {
     else pass('canonical', `${L}canonical self-referencing`);
     if (ctx.slashPolicy == null && c.pathname !== '/') ctx.slashPolicy = c.pathname.endsWith('/');
   } else pass('canonical', `${L}canonical absolute: ${h.canonical}`);
+  // a single-page app whose served HTML is an empty mount node: nothing for a crawler's first pass or for most AI agents
+  if (h.emptyRoot && h.mainText.length < 200) warn('spa-empty', `${L}client-rendered — the served HTML is an empty app root with ${h.mainText.length} characters of text: crawlers see an empty page first, most AI agents never see more; prerender this route${H('spa-empty')}`);
   // indexing matrix
   const path = here ? here.pathname : '';
   indexMatrix(h, here, L);
@@ -421,6 +431,7 @@ function pageChecks(h, pageUrl, label) {
   if (h1s.length === 0) fail('h1', `${L}no <h1>`); else if (h1s.length > 1) fail('h1', `${L}${h1s.length} <h1> elements: ${h1s.map((x) => `"${x.text.slice(0, 40)}"${x.role ? ' (role="heading" aria-level="1")' : ''}`).join(', ')}${h1s.some((x) => x.role) ? ' — an ARIA heading is still a heading; two languages on one page need two routes with hreflang' : ''}${H('h1')}`);
   else if ([...h1s[0].text].length > 120 || ([...h1s[0].text].length > 70 && /[.;!?]$/.test(h1s[0].text))) warn('h1-body', `${L}the <h1> is a sentence, not a title (${[...h1s[0].text].length} chars: "${h1s[0].text.slice(0, 60)}…") — the first paragraph was put in the heading; the name of the thing belongs there`);
   else pass('h1', `${L}one <h1>: "${h1s[0].text.slice(0, 70)}"`);
+  if (h1s.length) { const letters = h1s[0].text.replace(/[^\p{L}]/gu, ''); if (letters.length >= 12 && letters.replace(/[^\p{Lu}]/gu, '').length / letters.length > 0.8) info('caps', `${L}the <h1> is written in capitals in the source — write it in sentence case and set text-transform: uppercase in CSS; screen readers spell capitals out and snippets quote them as written`); }
   const empties = hs.filter((x) => !x.text); if (empties.length) fail('h-empty', `${L}${empties.length} empty heading tag${sfx(empties.length)} (h${empties.map((e) => e.level).join(', h')})`);
   const firstSub = hs.find((x) => x.level > 1); if (firstSub && firstSub.level !== 2) warn('h-first', `${L}first sub-heading is <h${firstSub.level}> ("${firstSub.text.slice(0, 40)}") — should be <h2>${H('h-first')}`);
   const jumps = []; for (let i = 1; i < hs.length; i++) if (hs[i].level > hs[i - 1].level + 1) jumps.push(`h${hs[i - 1].level}→h${hs[i].level} ("${hs[i].text.slice(0, 30)}")`);
@@ -436,10 +447,12 @@ function pageChecks(h, pageUrl, label) {
     const ldImgs = new Set(); const walkLd = (v, k) => { if (!v) return; if (typeof v === 'string') { if (/^(?:image|thumbnailUrl|contentUrl|logo|url)$/.test(k || '') && /\.(?:jpe?g|png|webp|avif|gif)(?:[?#]|$)/i.test(v)) ldImgs.add(imgKey(v)); return; } if (Array.isArray(v)) return v.forEach((x) => walkLd(x, k)); if (typeof v === 'object') for (const [kk, vv] of Object.entries(v)) walkLd(vv, kk === 'url' ? k : kk); };
     walkLd(h.jsonld);
     const ae = h.markup?.altEmpty || [];
-    const content = ae.filter((x) => !x.hidden && (x.sole || x.wide || x.fig || (x.src && ldImgs.has(imgKey(x.src)))));
+    // a YouTube thumbnail (i.ytimg.com, or a file named by the 11-character video id) is always content: its alt is the video's title
+    const isVideoThumb = (src) => /i\.ytimg\.com\/|img\.youtube\.com\/vi\//i.test(src) || ((n) => /^[\w-]{11}$/.test(n) && /[A-Z]/.test(n) && /[a-z]/.test(n) && !/^(?:[A-Z]?[a-z]+)+\d*$/.test(n))(String(src).split(/[?#]/)[0].split('/').pop().replace(/\.(?:jpe?g|webp|png|avif)$/i, ''));
+    const content = ae.filter((x) => !x.hidden && (x.sole || x.wide || x.fig || (x.src && (ldImgs.has(imgKey(x.src)) || isVideoThumb(x.src)))));
     if (content.length) {
-      const why = (x) => [x.sole && `the only content of a ${x.ctl === 'a' ? 'link' : 'button'}, which is left without a name`, x.src && ldImgs.has(imgKey(x.src)) && 'the image the JSON-LD names', x.fig && 'inside a <figure>', x.wide && '200 px or wider'].filter(Boolean).join(', ');
-      warn('img-alt-empty', `${L}${content.length} <img alt=""> that look like content — alt="" tells screen readers and Google Images to skip an image; describe these`, content.slice(0, 8).map((x) => `${(x.src.split('?')[0].split('/').pop() || '(no src)').slice(0, 60)} — ${why(x)}`).join('\n'));
+      const why = (x) => [x.sole && `the only content of a ${x.ctl === 'a' ? 'link' : 'button'}, which is left without a name`, x.src && isVideoThumb(x.src) && 'a video thumbnail — its alt is the video\'s title', x.src && ldImgs.has(imgKey(x.src)) && 'the image the JSON-LD names', x.fig && 'inside a <figure>', x.wide && '200 px or wider'].filter(Boolean).join(', ');
+      warn('img-alt-empty', `${L}${content.length} <img alt=""> that ${content.length === 1 ? 'looks' : 'look'} like content — alt="" tells screen readers and Google Images to skip an image; describe these`, content.slice(0, 8).map((x) => `${(x.src.split('?')[0].split('/').pop() || '(no src)').slice(0, 60)} — ${why(x)}`).join('\n'));
     }
     const hiddenAlt = ae.filter((x) => x.hidden).length; if (hiddenAlt) info('img-alt-hidden', `${L}${hiddenAlt} <img alt=""> inside aria-hidden / role="presentation" — right for assistive tech, but Google Images never sees them`);
     else if (!content.length) pass('img-alt', `${L}all ${imgs.length} <img> carry alt${ae.length ? ` (${ae.length} with alt="", decorative)` : ''}`);
@@ -584,8 +597,13 @@ function orgCheck(jsonld) {
   const n = org || person; const t = types(n).find((x) => isOrg(x) || x === 'Person'); const miss = [];
   if (!n.description) miss.push('description'); if (!n.sameAs || ![].concat(n.sameAs).filter(Boolean).length) miss.push('sameAs (its social and directory profiles)');
   if (org && !n.logo) miss.push('logo'); if (!n.url) miss.push('url');
-  if (miss.length) warn('org-entity', `${t} "${n.name || '?'}" on the home page without ${miss.join(', ')} — sameAs is how the knowledge graph ties a name to its profiles; without it the brand is a string that matches other brands`);
+  if (miss.length) {
+    const WHY = { description: 'what it is, in its own words', 'sameAs (its social and directory profiles)': 'how the knowledge graph ties the name to its profiles — without it the brand is a string that matches other brands', logo: 'the image shown beside it', url: 'its home' };
+    warn('org-entity', `${t} "${n.name || '?'}" on the home page without ${miss.map((m) => `${m.split(' (')[0]} (${WHY[m]})`).join('; ')}`);
+  }
   else pass('org-entity', `${t} "${n.name}" with description, sameAs${org ? ', logo' : ''} and url`);
+  // a one-person brand described as an Organization: the person is the entity people search for
+  if (org && n.name && (nodes.some((x) => types(x).includes('Person') && x.name && x !== n && n.name.includes(x.name)) || /^\p{Lu}\p{Ll}+ \p{Lu}\p{Ll}+\s*[—–|,]/u.test(n.name))) info('org-person', `"${n.name}" reads as a person's name — for a personal brand make a Person the main entity (jobTitle, image, sameAs, knowsAbout), and the brand an Organization with founder → that Person, or drop it`);
   if (org && !n.disambiguatingDescription) info('org-disambig', `${t} without disambiguatingDescription — one line is worth it when the name is new or close to others ("${n.name || 'X'}, the … in … — not …")`);
 }
 // text files with Greek (or any non-ASCII) need the charset in the header: without it browsers and many readers fall back to Latin-1
@@ -643,7 +661,7 @@ function langSummary() {
 }
 
 // ───────────────────────────── live mode ─────────────────────────────
-const UA = 'senrigan/0.6.0 (+static site visibility check; read-only)';
+const UA = 'senrigan/0.7.0 (+static site visibility check; read-only)';
 async function get(url, { redirect = 'manual', method = 'GET', timeout = 15000 } = {}) {
   url = toLocal(url);
   const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), timeout);
@@ -726,6 +744,7 @@ async function liveScan(input, hop = 0) {
   if (doc.bytes > 1_500_000) warn('html-size', `home HTML is ${(doc.bytes / 1e6).toFixed(1)} MB — crawlers truncate very large documents and render budgets suffer; inline SVGs, inline CSS/JS or embedded data are the usual cause`);
   else if (doc.bytes > 500_000) info('html-size', `home HTML is ${Math.round(doc.bytes / 1024)} KB — on the heavy side for a static page`);
   const ct = doc.headers['content-type'] || ''; if (!/text\/html/i.test(ct)) warn('content-type', `document Content-Type is "${ct}"`); if (!/charset=/i.test(ct) && !/<meta[^>]+charset/i.test(doc.text)) warn('charset', 'no charset in Content-Type nor <meta charset>');
+  ctx.platform = detectPlatform(inspect(doc.text));
   const local = /^(localhost|127\.|0\.0\.0\.0|\[::1\]|192\.168\.|10\.)/.test(finalUrl.hostname);
   // the host that was scanned is not the one its pages name as canonical: one finding, then the scan moves to the canonical host
   // (otherwise every page reports "canonical points to another host" and the sitemap, links and hreflang all look foreign)
@@ -744,12 +763,19 @@ async function liveScan(input, hop = 0) {
   if (local) { const canon = doc.text.match(/<link[^>]+rel\s*=\s*["']canonical["'][^>]*href\s*=\s*["']([^"']*)["']/i)?.[1] || doc.text.match(/<link[^>]+href\s*=\s*["']([^"']*)["'][^>]*rel\s*=\s*["']canonical["']/i)?.[1]; if (canon && isHttp(canon) && !/\.(?:jpe?g|png|gif|webp|svg|pdf)(?:[?#]|$)/i.test(canon)) ctx.aliasOrigin = new URL(canon).origin; ctx.local = true; info('local', `local address — host checks (https, www alias) skipped${ctx.aliasOrigin ? `; absolute URLs on ${new URL(ctx.aliasOrigin).host} are fetched from here` : ''}`); ctx.https = true; }
   else {
     if (!ctx.https) { warn('https', 'site served over http:// — https is a ranking signal and a prerequisite for most features'); KEKKAI('transport: the site is not on https'); }
+    // a temporary redirect (302 / 303 / 307) between hosts or schemes: the engine keeps the old address in view and the signals stay split
+    const tempHops = [];
+    for (let i = 0; i < chain.length - 1; i++) { const a = new URL(chain[i].url), b = new URL(chain[i + 1].url); if ([302, 303, 307].includes(chain[i].status) && (a.host !== b.host || a.protocol !== b.protocol)) tempHops.push(`${a.host}${a.protocol === 'http:' ? ' (http)' : ''} → ${chain[i].status} → ${b.origin}/`); }
     const other = finalUrl.hostname.startsWith('www.') ? finalUrl.hostname.slice(4) : `www.${finalUrl.hostname}`;
     const o = await get(`https://${other}/`);
     if (o.status === 200) { warn('alias', `https://${other}/ also serves 200 — two hosts, one content; 301 one to the other (canonicals alone are a hint, not a rule)`); KEKKAI('transport: two hosts answer 200 — the redirect and HSTS are kekkai territory'); }
-    else if (o.status >= 300 && o.status < 400) pass('alias', `${other} → ${o.status} → ${o.headers.location || '?'}`);
+    else if (o.status === 301 || o.status === 308) pass('alias', `${other} → ${o.status} → ${o.headers.location || '?'}`);
+    else if (o.status >= 300 && o.status < 400) tempHops.push(`${other} → ${o.status} → ${o.headers.location || '?'}`);
     else info('alias', `https://${other}/ answers ${o.status || o.error}`);
-    if (!finalUrl.hostname.startsWith('www.') && finalUrl.hostname.split('.').length === 2) { info('apex-primary', `the primary host is the apex (${finalUrl.hostname}) — neutral for search, but www gives cookie isolation from subdomains and a plain CNAME for any CDN`); KEKKAI(`infrastructure: the apex ${finalUrl.hostname} is the primary host`); }
+    const apexPrimary = !finalUrl.hostname.startsWith('www.') && finalUrl.hostname.split('.').length === 2;
+    const uniqHops = [...new Set(tempHops)];
+    if (uniqHops.length) { warn('host-redirect', `temporary redirect between hosts (${uniqHops.map((x) => x.split(' → ')[1]).filter((v, k, a) => a.indexOf(v) === k).join(' / ')}) — engines keep the old address in view and split the signals; ${apexPrimary ? `make www primary and 301 ${finalUrl.hostname} to it` : 'answer 301 (or 308)'}${H('host-redirect')}`, uniqHops.join('\n')); KEKKAI(`transport: ${uniqHops.join('; ')} — temporary redirects between hosts; 301/308${apexPrimary ? ', with www as the primary host' : ''}`); }
+    if (apexPrimary && !uniqHops.length) { info('apex-primary', `the primary host is the apex (${finalUrl.hostname}) — neutral for search, but www gives cookie isolation from subdomains and a plain CNAME for any CDN`); KEKKAI(`infrastructure: the apex ${finalUrl.hostname} is the primary host`); }
   }
   const xr = doc.headers['x-robots-tag']; if (xr && /noindex/i.test(xr)) fail('x-robots', `X-Robots-Tag: ${xr} on the home page`); else if (xr) info('x-robots', `X-Robots-Tag: ${xr}`);
 
@@ -827,7 +853,8 @@ async function liveScan(input, hop = 0) {
   ctx.platform = detectPlatform(home); if (ctx.platform) { section('Reach'); info('platform', `platform: ${ctx.platform}${home.generator ? ` (generator meta)` : ' (asset hosts)'} — hints in [brackets] point at that platform's settings`); }
   pageChecks(home, doc.url, '/');
   orgCheck(home.jsonld);
-  if (home.text.length < 200) warn('thin', '/: less than 200 characters of text in the served HTML — if the content arrives with JavaScript, crawlers see an empty page first');
+  if (/Lovable|Vite SPA/.test(ctx.platform) && !home.emptyRoot && home.mainText.length > 500) { section('Reach'); info('spa-prerendered', `${ctx.platform} app, prerendered: the served HTML carries the content — crawlers and agents read it without running JavaScript; keep every new route in the prerender`); }
+  if (home.text.length < 200 && !home.emptyRoot) warn('thin', '/: less than 200 characters of text in the served HTML — if the content arrives with JavaScript, crawlers see an empty page first');
 
   // inner pages from the sitemap (spread across the list), then from links if no sitemap
   const list = sitemap.urls.map((x) => x.loc).filter((l) => normKey(l) !== normKey(doc.url) && sameHost(l));
@@ -853,7 +880,7 @@ async function liveScan(input, hop = 0) {
     const p = queue[qi]; if (!p) break;
     const { final: r, chain: ch } = await follow(p); fetched.set(normKey(p), r.status);
     const path = new URL(p).pathname;
-    if (r.status !== 200) { section('Reach'); fail('inner', `${path} answers ${r.status || r.error}${ch.length > 1 ? ` (via ${ch.map((c) => c.status).join('→')})` : ''} but is listed in the sitemap`); continue; }
+    if (r.status !== 200) { section('Reach'); fail('inner', `${path} answers ${r.status || r.error}${ch.length > 1 ? ` (via ${ch.map((c) => c.status).join('→')})` : ''} ${ctx.sitemapUrls.has(normKey(p)) ? 'but is listed in the sitemap' : 'but is linked from the site'}`); continue; }
     if (!/text\/html/i.test(r.headers['content-type'] || '')) { section('Reach'); info('inner', `${path}: ${r.headers['content-type'] || 'unknown type'} — not an HTML page, skipped`); continue; }
     if (ch.length > 1) { section('Reach'); warn('inner-redirect', `${path} redirects (${ch.map((c) => c.status).join('→')} → ${new URL(r.url).pathname}) — the sitemap should list final URLs only`); }
     const xr2 = r.headers['x-robots-tag']; if (xr2 && /noindex/i.test(xr2)) { section('Reach'); fail('x-robots', `${path}: X-Robots-Tag ${xr2} yet listed in the sitemap`); }
@@ -1202,7 +1229,7 @@ const labelOf = (r) => { const l = r.msg.match(/^(\/\S*): /)?.[1] ?? null; retur
       const n = g.pages.size; if (n < 3 || n < Math.ceil(nPages * 0.6)) continue;
       g.idx.forEach((i) => drop.add(i));
       const raw = g.first.msg.replace(/^\/\S*: /, '');
-      const GENERIC = { thin: 'thin main content (under 300 chars)', 'img-lazy': 'images without loading="lazy"', 'img-decoding': 'images without decoding="async"', 'og-type': 'no og:type', 'og-image-alt': 'no og:image:alt', twitter: 'no twitter:card', lang: 'lang attribute set', viewport: 'viewport ok', title: 'title within 15–60 chars', description: 'description within 50–160 chars', canonical: 'canonical self-referencing', noindex: 'indexable', hreflang: 'hreflang set present', h1: 'one <h1>', 'h-order': 'heading levels descend without jumps', 'img-alt': 'every <img> carries alt', jsonld: 'JSON-LD present', og: 'og:title / description / image / url present', breadcrumb: 'BreadcrumbList valid', dom: 'DOM size within limits', img: 'no <img> in the body', 'title-short': 'short titles (under 30 chars)', 'description-short': 'descriptions under 110 chars', 'img-alt-empty': 'content images with alt=""', 'img-alt-hidden': 'alt="" images inside aria-hidden' };
+      const GENERIC = { thin: 'thin main content (under 300 chars)', 'img-lazy': 'images without loading="lazy"', 'img-decoding': 'images without decoding="async"', 'og-type': 'no og:type', 'og-image-alt': 'no og:image:alt', twitter: 'no twitter:card', lang: 'lang attribute set', viewport: 'viewport ok', title: 'title within 15–60 chars', description: 'description within 50–160 chars', canonical: 'canonical self-referencing', noindex: 'indexable', hreflang: 'hreflang set present', h1: 'one <h1>', 'h-order': 'heading levels descend without jumps', 'img-alt': 'every <img> carries alt', jsonld: 'JSON-LD present', og: 'og:title / description / image / url present', breadcrumb: 'BreadcrumbList valid', dom: 'DOM size within limits', img: 'no <img> in the body', 'title-short': 'short titles (under 30 chars)', 'description-short': 'descriptions under 110 chars', 'img-alt-empty': 'content images with alt=""', 'img-alt-hidden': 'alt="" images inside aria-hidden', caps: '<h1> written in capitals' };
       const soft = g.first.level === 'pass' || g.first.level === 'info';
       const msg = soft ? (GENERIC[g.first.id] || raw.replace(/:\s*".*$/, '').replace(/\s*\(.*?\)\s*$/, '').replace(/\b\d+(?:\/\d+)?\s*/g, '').replace(/\s{2,}/g, ' ').trim()) : `e.g. ${raw}`;
       const pagesList = [...g.pages];
@@ -1216,8 +1243,8 @@ const labelOf = (r) => { const l = r.msg.match(/^(\/\S*): /)?.[1] ?? null; retur
 //   INVISIBLE — the site or the page cannot enter the index (or tells the engine another URL is the real one)
 //   DILUTED   — it can be indexed, but its signals are split, contradictory or lost
 //   DEGRADED  — it is indexed as it is, but shown worse than it could be
-const INVISIBLE = new Set(['crawl-robots', 'fetch', 'status', 'robots', 'x-robots', 'noindex', 'canonical-file', 'canonical-redirect', 'hreflang-file', 'sitemap-robots', 'inner', 'sitemap-404', 'sitemap-host']);
-const DILUTED = new Set(['crawl-none', 'crawl-gap', 'crawl-404', 'crawl-5xx', 'crawl-redirect', 'crawl-budget', 'canonical-host', 'link-redirect', 'robots-default-deny', 'jsonld-product', 'alias', 'https', 'canonical', 'canonical-slash', 'canonical-html', 'title-dup', 'description-dup', 'hreflang', 'hreflang-recip', 'lang', 'lang-script', 'h1', 'h-empty', 'slash', 'sitemap', 'sitemap-slash', 'sitemap-scheme', 'sitemap-gap', 'inner-redirect', 'broken', 'orphan', 'nofollow', 'nofollow-meta', 'mixed', 'jsonld-syntax', 'jsonld-context', 'jsonld-h1', 'jsonld-article', 'jsonld-legal', 'terms-link', 'og-url', 'thin', 'fake-link']);
+const INVISIBLE = new Set(['spa-empty', 'crawl-robots', 'fetch', 'status', 'robots', 'x-robots', 'noindex', 'canonical-file', 'canonical-redirect', 'hreflang-file', 'sitemap-robots', 'inner', 'sitemap-404', 'sitemap-host']);
+const DILUTED = new Set(['host-redirect', 'title-width', 'crawl-none', 'crawl-gap', 'crawl-404', 'crawl-5xx', 'crawl-redirect', 'crawl-budget', 'canonical-host', 'link-redirect', 'robots-default-deny', 'jsonld-product', 'alias', 'https', 'canonical', 'canonical-slash', 'canonical-html', 'title-dup', 'description-dup', 'hreflang', 'hreflang-recip', 'lang', 'lang-script', 'h1', 'h-empty', 'slash', 'sitemap', 'sitemap-slash', 'sitemap-scheme', 'sitemap-gap', 'inner-redirect', 'broken', 'orphan', 'nofollow', 'nofollow-meta', 'mixed', 'jsonld-syntax', 'jsonld-context', 'jsonld-h1', 'jsonld-article', 'jsonld-legal', 'terms-link', 'og-url', 'thin', 'fake-link']);
 const tierOf = (r) => (r.level === 'pass' || r.level === 'info') ? '' : INVISIBLE.has(r.id) && !(r.id === 'noindex' && r.level === 'warn' && !/sitemap/.test(r.msg)) ? 'INVISIBLE' : DILUTED.has(r.id) ? 'DILUTED' : 'DEGRADED';
 for (const r of results) r.tier = tierOf(r);
 const tiers = { INVISIBLE: 0, DILUTED: 0, DEGRADED: 0 }; for (const r of results) if (r.tier) tiers[r.tier]++;

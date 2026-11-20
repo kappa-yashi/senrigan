@@ -115,6 +115,9 @@ description — rather than dropping the check.
 | INVISIBLE count > 0 | pages are out of the index right now | fix these before any other finding, then re-run live |
 | robots.txt blocks Googlebot / bingbot | the whole site is out of that index | the only robots finding that is INVISIBLE — fix it now |
 | robots.txt denies by default | `Disallow: /` under `*`, engines allowed by name: Google and Bing crawl, but ChatGPT search, Apple, DuckDuckGo and the link previews are shut out | `Allow: /` under `*`; block AI-training crawlers by name in their own group. Show the user the list the report prints before changing it — it may be deliberate |
+| temporary redirect between hosts (302 / 307) | the old host stays in view, signals split | 301 / 308; with the apex primary, make `www` primary and 301 the apex — hand to kekkai. On hosted builders (Lovable and the like) the redirect is the platform's: if it cannot be 301 there, a proxy rule in front can |
+| client-rendered: empty app root | the served HTML is `<div id="root"></div>` — crawlers' first pass and AI agents see nothing | prerender every route at build (SSG) or SSR; INVISIBLE until fixed |
+| Organization named after a person | a personal brand described as a company | `Person` as the main entity (jobTitle, image, sameAs, knowsAbout); the brand as `Organization` with `founder`, or drop it |
 | scanned host ≠ canonical host | a second host serves the site with 200 | 301 it to the canonical host (kekkai covers the redirect); the scan already moved to the canonical one |
 | internal link redirects | a hop per click and per crawl, signals split across two addresses | link the final URL the report names |
 | Product next to a business | a Hotel / Restaurant / Service described as goods | drop the Product node; the business type, plus `HotelRoom` / `Offer` / `Menu` / `Service` / `Event` for what it offers |

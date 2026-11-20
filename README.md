@@ -45,6 +45,20 @@ or clone and run `node bin/senrigan.mjs <target>`.
 
 ## What it checks
 
+**Reach** (live)
+
+- the redirect chain from what you typed to what answers; the other host
+  (`www` ↔ apex) must redirect, not serve the same pages with 200
+- a **temporary** redirect (302 / 303 / 307) between hosts or from http is a
+  warning: engines keep the old address in view and the signals stay split —
+  301 or 308. When the apex is the primary host as well, the advice is one
+  line: make `www` primary and 301 the apex to it (both go to kekkai too)
+- single-page apps (Vite / React, Lovable): a served HTML that is an empty
+  app root (`<div id="root"></div>`) is INVISIBLE — a crawler's first pass and
+  most AI agents see an empty page; checked on every sampled route. A
+  prerendered app (the content is in the served HTML) gets a note to keep
+  every new route in the prerender
+
 **Layer 0 — root assets** (live and `dist/`)
 
 - `robots.txt`, read **crawler by crawler** the way crawlers read it (a
@@ -81,8 +95,9 @@ or clone and run `node bin/senrigan.mjs <target>`.
   hreflang entry
 - viewport with `width=device-width`, no zoom blocking
 - `<title>`: present, 15–60 characters and under ~600 px wide (Google cuts
-  by width; capitals and Greek run wide), unique across the scanned pages;
-  under 30 characters is a note, not a warning
+  by width; capitals and Greek run wide — reported on its own, so a
+  site-wide line never mixes "too long" with "too wide"), unique across the
+  scanned pages; under 30 characters is a note, not a warning
   (the two language versions of one page, tied by hreflang, are not
   duplicates of each other)
 - meta description: present, ≤160 characters, unique (same rule); under 110
@@ -115,13 +130,16 @@ or clone and run `node bin/senrigan.mjs <target>`.
 - heading skeleton, four rules: exactly one `<h1>`; no level jumps
   (`h2 → h4`); the first sub-heading is an `<h2>`; no empty heading tags.
   Inline SVG wordmarks count by their `aria-label` / `<title>`; an `<h1>`
-  that is a whole sentence (the first paragraph put in the heading) is flagged
+  that is a whole sentence (the first paragraph put in the heading) is flagged;
+  an `<h1>` typed in capitals is a note (sentence case in the source,
+  `text-transform` in CSS)
 - DOM size against the Lighthouse limits (1 500 nodes, depth 32) — a
   warning, never the verdict
 - images: missing `alt` is a failure. `alt=""` is right for decoration and
   wrong for content, so each empty alt is judged by what surrounds it: the
   only content of a link or button (which is then left without a name),
-  200 px or wider, inside a `<figure>`, or the image the page's JSON-LD names
+  200 px or wider, inside a `<figure>`, the image the page's JSON-LD names,
+  or a video thumbnail (YouTube: its alt is the video's title)
   — those are reported; inside `aria-hidden` / `role="presentation"` it is a
   note (right for assistive tech, invisible to Google Images). Missing
   `width`/`height` (layout shift); `loading="lazy"` and `decoding="async"`
@@ -158,7 +176,10 @@ or clone and run `node bin/senrigan.mjs <target>`.
 - the brand as an entity: the home page's `Organization` (or business, or
   `Person`) needs `description`, `sameAs` (its social and directory profiles —
   how the knowledge graph tells this brand from every other with a similar
-  name), `url` and `logo`; `disambiguatingDescription` is suggested
+  name), `url` and `logo`, each missing one named with what it is for;
+  `disambiguatingDescription` is suggested. An `Organization` named after a
+  person (a personal brand) gets a note: make the `Person` the main entity
+  and the brand an `Organization` with `founder`
 - `Product` declared next to a business (`Hotel`, `Restaurant`, a
   `…Service`): Product is for goods that are bought; the business and what it
   offers have their own types (`HotelRoom`, `Offer`, `Menu`, `Service`,
@@ -232,7 +253,7 @@ A finding that repeats on most scanned pages is one finding about the
 template, so the report says `9/9 pages: no rel="canonical" — site-wide`
 once instead of nine times. The platform is detected from the generator
 meta or the asset hosts (Webflow, Wix, WordPress, Squarespace, Shopify,
-Framer, Astro, Next.js…) and relevant findings carry a hint in brackets
+Framer, Lovable, Vite SPA, Astro, Next.js…) and relevant findings carry a hint in brackets
 pointing at that platform's setting — `[Webflow: Site settings → SEO →
 "Global canonical tag URL"]`. Greek and Latin-1 named entities
 (`&alpha;&beta;`) are decoded, so headings on page-builder sites read as text.
