@@ -643,7 +643,7 @@ function langSummary() {
 }
 
 // ───────────────────────────── live mode ─────────────────────────────
-const UA = 'senrigan/0.6.0 (+static site visibility check; read-only)';
+const UA = 'senrigan/0.7.0 (+static site visibility check; read-only)';
 async function get(url, { redirect = 'manual', method = 'GET', timeout = 15000 } = {}) {
   url = toLocal(url);
   const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), timeout);
@@ -662,6 +662,14 @@ async function follow(url, max = 6) {
 // HEAD with GET fallback (some edges answer 405 to HEAD)
 async function status(url) { let r = await get(url, { method: 'HEAD' }); if (r.status === 405 || r.status === 0) r = await get(url); return r; }
 const soft404 = (r) => r.status === 200 && /<title[^>]*>[^<]*(not found|404|δεν βρέθηκε)/i.test(r.text);
+// the not-found page answered with 200 (SPA fallback, catch-all route): bodies differ in tokens and nonces,
+// so compare type, <title> and size — a real page has its own title or its own length
+const titleOf = (t) => (String(t).match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || '').trim();
+function isFallback(r, ref) {
+  if (!ref || r.status !== 200 || !/html/i.test(r.headers['content-type'] || '') || !/html/i.test(ref.headers?.['content-type'] || '')) return false;
+  const a = r.bytes || r.text.length, b = ref.bytes || ref.text.length;
+  return b > 0 && Math.abs(a - b) / b < 0.03 && titleOf(r.text) === titleOf(ref.text);
+}
 
 function parseRobots(txt) {
   const groups = []; let g = null;
@@ -752,6 +760,18 @@ async function liveScan(input, hop = 0) {
     if (!finalUrl.hostname.startsWith('www.') && finalUrl.hostname.split('.').length === 2) { info('apex-primary', `the primary host is the apex (${finalUrl.hostname}) — neutral for search, but www gives cookie isolation from subdomains and a plain CNAME for any CDN`); KEKKAI(`infrastructure: the apex ${finalUrl.hostname} is the primary host`); }
   }
   const xr = doc.headers['x-robots-tag']; if (xr && /noindex/i.test(xr)) fail('x-robots', `X-Robots-Tag: ${xr} on the home page`); else if (xr) info('x-robots', `X-Robots-Tag: ${xr}`);
+  // what an address that does not exist answers: 404/410, or a page that only looks like "not found" (soft 404)
+  ctx.fallback = null; ctx.fallbackTo = null;
+  const rnd = await get(`${ctx.origin}/senrigan-${Date.now().toString(36)}-not-here/`);
+  if (rnd.status === 404 || rnd.status === 410) pass('not-found', `an unknown address answers ${rnd.status}`);
+  else if (rnd.status === 200) {
+    ctx.fallback = rnd;
+    const says = soft404(rnd) || /(not found|δεν βρέθηκε|404)/i.test(inspect(rnd.text).headings.filter((x) => x.level === 1).map((x) => x.text).join(' '));
+    fail('soft-404', `an unknown address answers 200${says ? ' with a "not found" page' : ''} — a soft 404: people ${says ? 'read "not found"' : 'see a page'}, crawlers, Search Console, analytics and link checkers read "this page exists". Broken links (a typo in a campaign URL, a page that was removed) never show up as errors, and Google spends crawl on addresses that are not there. The host must answer 404 for unknown paths (a static 404.html where the host supports it)`);
+  } else if (rnd.status >= 300 && rnd.status < 400) {
+    ctx.fallbackTo = abs(rnd.headers.location || '', rnd.url);
+    fail('soft-404', `an unknown address answers ${rnd.status} → ${(rnd.headers.location || '?').slice(0, 60)} — unknown paths are redirected instead of answering 404; Google treats a redirect to an unrelated page as a soft 404, and a broken link lands elsewhere without any error. Answer 404, and 301 only the old URLs you know`);
+  } else if (rnd.status) info('not-found', `an unknown address answers ${rnd.status}`);
 
   // Layer 0
   section('Root assets');
@@ -854,6 +874,8 @@ async function liveScan(input, hop = 0) {
     const { final: r, chain: ch } = await follow(p); fetched.set(normKey(p), r.status);
     const path = new URL(p).pathname;
     if (r.status !== 200) { section('Reach'); fail('inner', `${path} answers ${r.status || r.error}${ch.length > 1 ? ` (via ${ch.map((c) => c.status).join('→')})` : ''} but is listed in the sitemap`); continue; }
+    if (ctx.fallback && isFallback(r, ctx.fallback)) { section('Reach'); fail('inner-soft-404', `${path} answers 200 but serves the same page as an unknown address (soft 404) — listed in the sitemap, missing in the site`); continue; }
+    if (ctx.fallbackTo && ch.length > 1 && normKey(r.url) === normKey(ctx.fallbackTo)) { section('Reach'); fail('inner-soft-404', `${path} redirects to where unknown addresses go (${new URL(r.url).pathname}) — listed in the sitemap, missing in the site`); continue; }
     if (!/text\/html/i.test(r.headers['content-type'] || '')) { section('Reach'); info('inner', `${path}: ${r.headers['content-type'] || 'unknown type'} — not an HTML page, skipped`); continue; }
     if (ch.length > 1) { section('Reach'); warn('inner-redirect', `${path} redirects (${ch.map((c) => c.status).join('→')} → ${new URL(r.url).pathname}) — the sitemap should list final URLs only`); }
     const xr2 = r.headers['x-robots-tag']; if (xr2 && /noindex/i.test(xr2)) { section('Reach'); fail('x-robots', `${path}: X-Robots-Tag ${xr2} yet listed in the sitemap`); }
@@ -881,7 +903,11 @@ async function liveScan(input, hop = 0) {
     const cand = [...ctx.linkTargets.values()].filter((l) => !fetched.has(normKey(l)) && !/\.(jpg|jpeg|png|webp|avif|gif|svg|pdf|zip|mp4|webm|css|js|xml|txt|ico|woff2?)$/i.test(new URL(l).pathname)).slice(0, 40);
     let broken = [], redir = [];
     for (const l of cand) {
-      const r = await status(l); fetched.set(normKey(l), r.status);
+      let r = await status(l);
+      // on a soft-404 host a missing page answers 200: only a GET compared with the not-found page tells them apart
+      if (ctx.fallback && r.status === 200) { r = await get(l); if (isFallback(r, ctx.fallback)) { fetched.set(normKey(l), 404); broken.push(`${new URL(l).pathname} → 200, the not-found page (soft 404)`); continue; } }
+      if (ctx.fallbackTo && r.status >= 300 && r.status < 400 && normKey(abs(r.headers.location || '', l) || '') === normKey(ctx.fallbackTo)) { fetched.set(normKey(l), 404); broken.push(`${new URL(l).pathname} → ${r.status} to where unknown addresses go (soft 404)`); continue; }
+      fetched.set(normKey(l), r.status);
       if (r.status >= 400 || r.status === 0) broken.push(`${new URL(l).pathname} → ${r.status || r.error}`);
       else if (r.status >= 300 && r.headers.location) {
         // a link that redirects is a hop on every click and every crawl; count its destination as the page that is linked
