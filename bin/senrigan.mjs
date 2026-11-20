@@ -29,7 +29,8 @@ import { join, relative, extname, dirname, sep } from 'node:path';
 // ───────────────────────────── cli ─────────────────────────────
 const argv = process.argv.slice(2);
 const opt = { json: false, summary: false, out: '', strict: false, pages: 8, semantic: false, probe: true, base: '', mode: '', logs: [] };
-const KNOWN_FLAGS = ['--json', '--summary', '--out', '--strict', '--pages', '--semantic', '--no-probe', '--base', '--dist', '--logs', '-h', '--help'];
+const VERSION = '0.8.0';
+const KNOWN_FLAGS = ['--version', '-v', '--json', '--summary', '--out', '--strict', '--pages', '--semantic', '--no-probe', '--base', '--dist', '--logs', '-h', '--help'];
 const similar = (a) => KNOWN_FLAGS.map((f) => [f, [...f].filter((ch, i) => a[i] === ch).length / Math.max(f.length, a.length)]).sort((x, y) => y[1] - x[1])[0];
 let target = '';
 for (let i = 0; i < argv.length; i++) {
@@ -46,12 +47,13 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === '--dist') opt.mode = 'dist';
   else if (a === '--logs') { const v = argv[++i]; if (v) opt.logs.push(v); }
   else if (a === '-h' || a === '--help') { usage(); process.exit(0); }
+  else if (a === '--version' || a === '-v') { console.log(`senrigan ${VERSION}`); process.exit(0); }
   else target = a;
 }
 if (!target) { usage(); process.exit(2); }
 
 function usage() {
-  console.log(`senrigan (千里眼) — static site visibility & structure check
+  console.log(`senrigan ${VERSION} (千里眼) — static site visibility & structure check
 
   senrigan https://www.example.com      live scan (read-only GET/HEAD requests)
   senrigan ./dist [--base https://host] scan a build folder
@@ -287,8 +289,8 @@ function detectPlatform(h) {
   return '';
 }
 const HINTS = {
-  Lovable: { 'spa-empty': 'Lovable builds a client-rendered Vite + React app: add a prerender step that writes every route as HTML at build, or host it where SSR / prerendering runs', 'host-redirect': 'the custom-domain redirect comes from the hosting platform; if it cannot be set to 301 there, a proxy in front (a Cloudflare redirect rule) can answer 301 instead', 'img-alt-empty': 'images placed by the AI builder often get alt="": ask it for alt from the image content, and for video thumbnails the video title' },
-  'Vite SPA': { 'spa-empty': 'a Vite SPA renders in the browser: prerender every route at build (SSG) or move to SSR' },
+  Lovable: { 'unknown-path': 'the app router catches every path and redirects or renders the home: add a NotFound route, and have the host answer 404 for paths outside the prerendered list', 'spa-empty': 'Lovable builds a client-rendered Vite + React app: add a prerender step that writes every route as HTML at build, or host it where SSR / prerendering runs', 'host-redirect': 'the custom-domain redirect comes from the hosting platform; if it cannot be set to 301 there, a proxy in front (a Cloudflare redirect rule) can answer 301 instead', 'img-alt-empty': 'images placed by the AI builder often get alt="": ask it for alt from the image content, and for video thumbnails the video title' },
+  'Vite SPA': { 'unknown-path': 'a SPA catch-all serves index.html for every path: let the host answer 404 outside the prerendered routes (on Cloudflare Pages a 404.html at the root turns its SPA fallback off)', 'spa-empty': 'a Vite SPA renders in the browser: prerender every route at build (SSG) or move to SSR' },
   Webflow: { canonical: 'Site settings → SEO → "Global canonical tag URL" emits it on every page', icons: 'Webflow serves favicon/webclip via <link> only; the blind /favicon.ico request 404s unless you add a redirect', og: 'Page settings → Open Graph; og:url is not emitted by default', lang: 'Site settings → General → Language', h1: 'a heading styled as H1 is still an H1 — restyle with a class, keep one H1 element per page' },
   Wix: { noindex: 'Pages → page → SEO basics → "Let search engines index this page"', description: 'Wix auto-fills the description from page text when the field is empty — write one', canonical: 'Site languages: the primary language should serve at the root and canonicalise to itself', 'h-first': 'theme text styles map to h6 for small text — change the text style, not the content', dom: 'Wix markup is deep by construction; nothing to fix here' },
   WordPress: { title: 'the SEO plugin title template appends the site name + tagline — shorten the template', h1: 'page builders split one headline into two heading blocks — make the second a paragraph', 'img-dim': 'the media library knows the dimensions; a lazy-load plugin or theme filter is stripping them' },
@@ -661,7 +663,7 @@ function langSummary() {
 }
 
 // ───────────────────────────── live mode ─────────────────────────────
-const UA = 'senrigan/0.7.0 (+static site visibility check; read-only)';
+const UA = `senrigan/${VERSION} (+static site visibility check; read-only)`;
 async function get(url, { redirect = 'manual', method = 'GET', timeout = 15000 } = {}) {
   url = toLocal(url);
   const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), timeout);
@@ -777,6 +779,16 @@ async function liveScan(input, hop = 0) {
     if (uniqHops.length) { warn('host-redirect', `temporary redirect between hosts (${uniqHops.map((x) => x.split(' → ')[1]).filter((v, k, a) => a.indexOf(v) === k).join(' / ')}) — engines keep the old address in view and split the signals; ${apexPrimary ? `make www primary and 301 ${finalUrl.hostname} to it` : 'answer 301 (or 308)'}${H('host-redirect')}`, uniqHops.join('\n')); KEKKAI(`transport: ${uniqHops.join('; ')} — temporary redirects between hosts; 301/308${apexPrimary ? ', with www as the primary host' : ''}`); }
     if (apexPrimary && !uniqHops.length) { info('apex-primary', `the primary host is the apex (${finalUrl.hostname}) — neutral for search, but www gives cookie isolation from subdomains and a plain CNAME for any CDN`); KEKKAI(`infrastructure: the apex ${finalUrl.hostname} is the primary host`); }
   }
+  // an address that does not exist must answer 404: a 200 or a redirect turns every typo and every deleted page into a soft 404
+  if (opt.probe) {
+    const rnd = `/senrigan-${Math.random().toString(36).slice(2, 10)}-not-here`; const r = await get(ctx.origin + rnd);
+    const to = r.headers.location ? (abs(r.headers.location, ctx.origin + rnd) || r.headers.location).replace(ctx.origin, '') : '?';
+    if (r.status === 404 || r.status === 410) pass('unknown-path', `an unknown address answers ${r.status}`);
+    else if (r.status === 200) fail('unknown-path', `an unknown address (${rnd}) answers 200 — every typo and every deleted page becomes a page: Google reports soft 404s and may index the error view; answer 404 for routes that do not exist${H('unknown-path')}`);
+    else if (r.status >= 300 && r.status < 400) fail('unknown-path', `an unknown address answers ${r.status} → ${to} — unknown paths are redirected instead of answering 404: Google treats a redirect to an unrelated page as a soft 404, and a broken link lands elsewhere without any error. Answer 404, and 301 only the old URLs you know${H('unknown-path')}`);
+    else if (r.status >= 500) warn('unknown-path', `an unknown address answers ${r.status} — a server error where a 404 belongs`);
+    else info('unknown-path', `an unknown address answers ${r.status || r.error}`);
+  }
   const xr = doc.headers['x-robots-tag']; if (xr && /noindex/i.test(xr)) fail('x-robots', `X-Robots-Tag: ${xr} on the home page`); else if (xr) info('x-robots', `X-Robots-Tag: ${xr}`);
 
   // Layer 0
@@ -853,7 +865,7 @@ async function liveScan(input, hop = 0) {
   ctx.platform = detectPlatform(home); if (ctx.platform) { section('Reach'); info('platform', `platform: ${ctx.platform}${home.generator ? ` (generator meta)` : ' (asset hosts)'} — hints in [brackets] point at that platform's settings`); }
   pageChecks(home, doc.url, '/');
   orgCheck(home.jsonld);
-  if (/Lovable|Vite SPA/.test(ctx.platform) && !home.emptyRoot && home.mainText.length > 500) { section('Reach'); info('spa-prerendered', `${ctx.platform} app, prerendered: the served HTML carries the content — crawlers and agents read it without running JavaScript; keep every new route in the prerender`); }
+  if (/Lovable|Vite SPA/.test(ctx.platform) && !home.emptyRoot && home.mainText.length > 500) { section('Reach'); info('spa-prerendered', `${ctx.platform === 'Lovable' ? 'Lovable app' : ctx.platform}, prerendered: the served HTML carries the content — crawlers and agents read it without running JavaScript; keep every new route in the prerender`); }
   if (home.text.length < 200 && !home.emptyRoot) warn('thin', '/: less than 200 characters of text in the served HTML — if the content arrives with JavaScript, crawlers see an empty page first');
 
   // inner pages from the sitemap (spread across the list), then from links if no sitemap
@@ -970,6 +982,8 @@ async function distScan(dir) {
   const robotsF = files.find((f) => rel(f) === '/robots.txt');
   let groups = [];
   if (!robotsF) warn('robots-file', 'no robots.txt in the output — crawlers assume "allow all", but the Sitemap line has nowhere to live'); else { groups = parseRobots(readFileSync(robotsF, 'utf8')); robotsReport(groups); ctx.robotsGroups = groups; if (!groups.sitemaps) warn('robots-sitemap', 'robots.txt without a Sitemap: line'); }
+  // without a 404 page the host decides what an unknown path is — Cloudflare Pages then serves the site as a single-page app (200 + the home page for every path)
+  if (files.some((f) => rel(f) === '/404.html')) pass('unknown-path', '404.html in the output — unknown paths can answer 404'); else warn('unknown-path', 'no 404.html in the output — the host decides what an unknown path is; Cloudflare Pages then treats the site as a single-page app and answers every unknown path with 200 and the home page (a soft 404 for each typo): ship a 404.html');
   const smF = files.filter((f) => /^\/sitemap[^/]*\.xml$/i.test(rel(f)));
   const smUrls = [];
   for (const f of smF) { const t = readFileSync(f, 'utf8'); for (const m of t.matchAll(/<url>([\s\S]*?)<\/url>/gi)) { const loc = m[1].match(/<loc>\s*([^<\s]+)\s*<\/loc>/i)?.[1]; const lastmod = m[1].match(/<lastmod>\s*([^<\s]+)\s*<\/lastmod>/i)?.[1]; if (loc) smUrls.push({ loc: decode(loc), lastmod }); } }
@@ -1244,7 +1258,7 @@ const labelOf = (r) => { const l = r.msg.match(/^(\/\S*): /)?.[1] ?? null; retur
 //   DILUTED   — it can be indexed, but its signals are split, contradictory or lost
 //   DEGRADED  — it is indexed as it is, but shown worse than it could be
 const INVISIBLE = new Set(['spa-empty', 'crawl-robots', 'fetch', 'status', 'robots', 'x-robots', 'noindex', 'canonical-file', 'canonical-redirect', 'hreflang-file', 'sitemap-robots', 'inner', 'sitemap-404', 'sitemap-host']);
-const DILUTED = new Set(['host-redirect', 'title-width', 'crawl-none', 'crawl-gap', 'crawl-404', 'crawl-5xx', 'crawl-redirect', 'crawl-budget', 'canonical-host', 'link-redirect', 'robots-default-deny', 'jsonld-product', 'alias', 'https', 'canonical', 'canonical-slash', 'canonical-html', 'title-dup', 'description-dup', 'hreflang', 'hreflang-recip', 'lang', 'lang-script', 'h1', 'h-empty', 'slash', 'sitemap', 'sitemap-slash', 'sitemap-scheme', 'sitemap-gap', 'inner-redirect', 'broken', 'orphan', 'nofollow', 'nofollow-meta', 'mixed', 'jsonld-syntax', 'jsonld-context', 'jsonld-h1', 'jsonld-article', 'jsonld-legal', 'terms-link', 'og-url', 'thin', 'fake-link']);
+const DILUTED = new Set(['unknown-path', 'host-redirect', 'title-width', 'crawl-none', 'crawl-gap', 'crawl-404', 'crawl-5xx', 'crawl-redirect', 'crawl-budget', 'canonical-host', 'link-redirect', 'robots-default-deny', 'jsonld-product', 'alias', 'https', 'canonical', 'canonical-slash', 'canonical-html', 'title-dup', 'description-dup', 'hreflang', 'hreflang-recip', 'lang', 'lang-script', 'h1', 'h-empty', 'slash', 'sitemap', 'sitemap-slash', 'sitemap-scheme', 'sitemap-gap', 'inner-redirect', 'broken', 'orphan', 'nofollow', 'nofollow-meta', 'mixed', 'jsonld-syntax', 'jsonld-context', 'jsonld-h1', 'jsonld-article', 'jsonld-legal', 'terms-link', 'og-url', 'thin', 'fake-link']);
 const tierOf = (r) => (r.level === 'pass' || r.level === 'info') ? '' : INVISIBLE.has(r.id) && !(r.id === 'noindex' && r.level === 'warn' && !/sitemap/.test(r.msg)) ? 'INVISIBLE' : DILUTED.has(r.id) ? 'DILUTED' : 'DEGRADED';
 for (const r of results) r.tier = tierOf(r);
 const tiers = { INVISIBLE: 0, DILUTED: 0, DEGRADED: 0 }; for (const r of results) if (r.tier) tiers[r.tier]++;
@@ -1274,7 +1288,7 @@ function render(fmt, color) {
   const pageMap = new Map(); for (const r of results) { const l = labelOf(r); if (l) (pageMap.get(l) || pageMap.set(l, []).get(l)).push(r); }
   const perPage = [...pageMap.entries()].map(([l, rs]) => [l, bySection(rs)]);
   if (fmt === 'md') {
-    lines.push(`# senrigan (千里眼) — ${mode} scan of ${target}`, '', `**${tierLine}** · ${counts.pass} pass · ${counts.warn} warn · ${counts.fail} fail · ${counts.info} info`, '', `> ${verdict}`, '');
+    lines.push(`# senrigan ${VERSION} (千里眼) — ${mode} scan of ${target}`, '', `**${tierLine}** · ${counts.pass} pass · ${counts.warn} warn · ${counts.fail} fail · ${counts.info} info`, '', `> ${verdict}`, '');
     if (invisible.length && !opt.summary) { lines.push('## Out of the index — fix first', ''); for (const r of invisible) lines.push(`- ${plainMark[r.level]} ${r.msg}`); lines.push(''); }
     const mdLine = (r, msg) => `- ${r.id === 'markup' && r.flag ? FLAG_ICON[r.flag] : plainMark[r.level]} ${opt.summary && r.tier ? `**${r.tier}** ` : tag(r) ? '**INVISIBLE** ' : ''}${msg}${r.detail && r.level !== 'pass' ? `\n  \`${String(r.detail).replace(/\n/g, ' · ')}\`` : ''}`;
     if (opt.summary) { let last = ''; for (const r of shown) { if (r.section !== last) { lines.push('', `## ${r.section}`, ''); last = r.section; } lines.push(mdLine(r, r.msg)); } }
@@ -1287,7 +1301,7 @@ function render(fmt, color) {
     return lines.join('\n') + '\n';
   }
   const flagColor = (f) => (f === 'RED' ? 31 : f === 'YELLOW' ? 33 : 32);
-  lines.push('', `senrigan (千里眼) — ${mode} scan of ${target}`, '', `  ${c(tiers.INVISIBLE ? 31 : 90, `INVISIBLE ${tiers.INVISIBLE}`)} · ${c(tiers.DILUTED ? 33 : 90, `DILUTED ${tiers.DILUTED}`)} · ${c(90, `DEGRADED ${tiers.DEGRADED}`)}${markupSite ? ` · ${c(flagColor(markupSite.flag), markupTag)}` : ''}`, '');
+  lines.push('', `senrigan ${VERSION} (千里眼) — ${mode} scan of ${target}`, '', `  ${c(tiers.INVISIBLE ? 31 : 90, `INVISIBLE ${tiers.INVISIBLE}`)} · ${c(tiers.DILUTED ? 33 : 90, `DILUTED ${tiers.DILUTED}`)} · ${c(90, `DEGRADED ${tiers.DEGRADED}`)}${markupSite ? ` · ${c(flagColor(markupSite.flag), markupTag)}` : ''}`, '');
   if (invisible.length && !opt.summary) { lines.push(c(1, '  Out of the index — fix first')); for (const r of invisible) lines.push(`    ${mark[r.level]} ${r.msg}`); lines.push(''); }
   const txtLine = (r, msg, ind) => {
     const t = opt.summary && r.tier ? c(r.tier === 'INVISIBLE' ? 31 : r.tier === 'DILUTED' ? 33 : 90, `${r.tier.padEnd(9)} `) : tag(r) ? c(31, 'INVISIBLE ') : '';
@@ -1306,7 +1320,7 @@ function render(fmt, color) {
   else lines.push(c(90, `  Visibility is half of it — check the security boundary too: ${kekkaiCmd}`), '');
   return lines.join('\n');
 }
-const jsonOut = () => JSON.stringify({ target, mode: isDir ? 'dist' : 'live', counts, tiers, markup: markupSite, ok: !failed, kekkai: ctx.kekkai, results }, null, 2);
+const jsonOut = () => JSON.stringify({ tool: 'senrigan', version: VERSION, target, mode: isDir ? 'dist' : 'live', counts, tiers, markup: markupSite, ok: !failed, kekkai: ctx.kekkai, results }, null, 2);
 if (opt.json) console.log(jsonOut()); else console.log(render('text', process.stdout.isTTY));
 if (opt.out) {
   const { resolve } = await import('node:path'); const where = resolve(opt.out);

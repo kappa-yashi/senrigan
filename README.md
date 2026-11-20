@@ -53,6 +53,11 @@ or clone and run `node bin/senrigan.mjs <target>`.
   warning: engines keep the old address in view and the signals stay split —
   301 or 308. When the apex is the primary host as well, the advice is one
   line: make `www` primary and 301 the apex to it (both go to kekkai too)
+- an address that does not exist (a random path) must answer **404**: a
+  200 (an SPA catch-all) or a redirect to another page turns every typo and
+  every deleted page into a soft 404 — a failure. In `dist/` mode a missing
+  `404.html` is reported: Cloudflare Pages then serves the site as a
+  single-page app, 200 and the home page for every unknown path
 - single-page apps (Vite / React, Lovable): a served HTML that is an empty
   app root (`<div id="root"></div>`) is INVISIBLE — a crawler's first pass and
   most AI agents see an empty page; checked on every sampled route. A
@@ -292,7 +297,8 @@ line per warning or failure, sorted by tier.
 ## Options
 
 ```
---json              machine-readable output
+--version           print the version (every report also names it in its first line)
+--json              machine-readable output (carries "version")
 --summary           only warnings and failures, one line each, plus counts
 --out <file>        also write the report (.json / .md / .txt)
 --strict            warnings count as failures (exit 1)
