@@ -29,7 +29,7 @@ import { join, relative, extname, dirname, sep } from 'node:path';
 // ───────────────────────────── cli ─────────────────────────────
 const argv = process.argv.slice(2);
 const opt = { json: false, summary: false, out: '', strict: false, pages: 8, semantic: false, probe: true, base: '', mode: '', logs: [] };
-const VERSION = '0.8.0';
+const VERSION = '0.8.1';
 const KNOWN_FLAGS = ['--version', '-v', '--json', '--summary', '--out', '--strict', '--pages', '--semantic', '--no-probe', '--base', '--dist', '--logs', '-h', '--help'];
 const similar = (a) => KNOWN_FLAGS.map((f) => [f, [...f].filter((ch, i) => a[i] === ch).length / Math.max(f.length, a.length)]).sort((x, y) => y[1] - x[1])[0];
 let target = '';

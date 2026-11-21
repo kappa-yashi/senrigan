@@ -334,14 +334,11 @@ Serve the build (`python -m http.server 4399 -d dist`) and scan
 sitemap, hreflang, canonicals) are fetched from the local server; the
 https / www checks are skipped.
 
-## As a Claude skill
+## The guide
 
-This repository is also a skill: `SKILL.md` tells Claude when to run the
-scanner, how to read the report and in which order to fix things;
 `reference/build-rules.md` holds the rules to write by (give it to whoever
 writes the templates, human or assistant, before the first page);
-`reference/visibility.md` is the long-form guide. Copy the folder to
-`~/.claude/skills/senrigan` or add it to your project's skills.
+`reference/visibility.md` is the long-form guide.
 
 ## Limits
 
@@ -360,6 +357,6 @@ writes the templates, human or assistant, before the first page);
 
 ## Licence
 
-- Code (`bin/`, `package.json`) and `SKILL.md`: [MIT](LICENSE).
+- Code (`bin/`, `package.json`): [MIT](LICENSE).
 - The guide `reference/visibility.md`: [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) —
   reuse and adapt it freely, credit **kappa.yashi** and link to the source.
