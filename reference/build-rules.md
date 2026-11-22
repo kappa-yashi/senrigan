@@ -149,6 +149,8 @@ help from the rest of the site.
 - No 302 / 307 between hosts or from http: host and scheme redirects are
   301 / 308, `www` primary.
 - No client-rendered pages: a single-page app ships every route prerendered.
+- No canonical, `og:url` or hreflang on a noindex page — the 404 above all:
+  the head template emits them only when the page is indexable.
 - No catch-all that answers 200 or redirects for unknown paths: a real 404
   (`404.html` on static hosts).
 - No headings typed in capitals: sentence case, `text-transform` in CSS.

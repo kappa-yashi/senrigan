@@ -29,7 +29,7 @@ import { join, relative, extname, dirname, sep } from 'node:path';
 // ───────────────────────────── cli ─────────────────────────────
 const argv = process.argv.slice(2);
 const opt = { json: false, summary: false, out: '', strict: false, pages: 8, semantic: false, probe: true, base: '', mode: '', logs: [] };
-const VERSION = '0.8.1';
+const VERSION = '0.9.0';
 const KNOWN_FLAGS = ['--version', '-v', '--json', '--summary', '--out', '--strict', '--pages', '--semantic', '--no-probe', '--base', '--dist', '--logs', '-h', '--help'];
 const similar = (a) => KNOWN_FLAGS.map((f) => [f, [...f].filter((ch, i) => a[i] === ch).length / Math.max(f.length, a.length)]).sort((x, y) => y[1] - x[1])[0];
 let target = '';
@@ -294,7 +294,7 @@ const HINTS = {
   Webflow: { canonical: 'Site settings → SEO → "Global canonical tag URL" emits it on every page', icons: 'Webflow serves favicon/webclip via <link> only; the blind /favicon.ico request 404s unless you add a redirect', og: 'Page settings → Open Graph; og:url is not emitted by default', lang: 'Site settings → General → Language', h1: 'a heading styled as H1 is still an H1 — restyle with a class, keep one H1 element per page' },
   Wix: { noindex: 'Pages → page → SEO basics → "Let search engines index this page"', description: 'Wix auto-fills the description from page text when the field is empty — write one', canonical: 'Site languages: the primary language should serve at the root and canonicalise to itself', 'h-first': 'theme text styles map to h6 for small text — change the text style, not the content', dom: 'Wix markup is deep by construction; nothing to fix here' },
   WordPress: { title: 'the SEO plugin title template appends the site name + tagline — shorten the template', h1: 'page builders split one headline into two heading blocks — make the second a paragraph', 'img-dim': 'the media library knows the dimensions; a lazy-load plugin or theme filter is stripping them' },
-  Astro: { 'canonical-slash': 'astro.config: trailingSlash + build.format must agree with the host redirect', slash: 'astro.config: trailingSlash + build.format', 'sitemap-gap': '@astrojs/sitemap with i18n configured, or a custom endpoint that walks every locale' },
+  Astro: { '404-head': 'pass a noindex / error prop to the base layout and skip canonical, og:url and hreflang when it is set', 'canonical-slash': 'astro.config: trailingSlash + build.format must agree with the host redirect', slash: 'astro.config: trailingSlash + build.format', 'sitemap-gap': '@astrojs/sitemap with i18n configured, or a custom endpoint that walks every locale' },
 };
 // entities that make the legal pages part of the offer (terms, licence, privacy are what the user agrees to): products, software, services, businesses
 const PRODUCT_TYPES = new Set(['SoftwareApplication', 'MobileApplication', 'WebApplication', 'VideoGame', 'Product', 'ProductModel', 'Service', 'WebAPI', 'FinancialProduct', 'Course', 'Event']);
@@ -723,13 +723,28 @@ function robotsReport(groups) {
     if (named.length) info('robots-ai', `${named.length} named agent${sfx(named.length)} fully blocked: ${named.join(', ')} (a decision, not a finding)`);
   }
 }
+// the error page's head: a layout that stamps canonical, og:url and hreflang on every page also stamps them on the 404 —
+// the error view then names a real page (usually the home) or an address that does not exist (/404/) as what it is
+async function errorHead(where, html, live) {
+  const h = inspect(html); const leaks = [];
+  if (h.canonical) leaks.push(`canonical → ${h.canonical}`);
+  if (h.og['og:url']) leaks.push(`og:url → ${h.og['og:url']}`);
+  if (h.hreflang.length) leaks.push(`${h.hreflang.length} hreflang alternate${sfx(h.hreflang.length)} (${h.hreflang.slice(0, 3).map((x) => `${x.lang} → ${x.href}`).join(', ')}${h.hreflang.length > 3 ? ', …' : ''})`);
+  const noindex = /noindex/i.test(h.robotsMeta || '');
+  if (!leaks.length) { pass('404-head', `${where}: no canonical, og:url or hreflang${noindex ? ' (noindex)' : ''}`); return; }
+  let target = '';
+  if (live && h.canonical && isHttp(h.canonical) && sameHost(h.canonical)) { const t = await status(h.canonical); target = ` — the canonical answers ${t.status || t.error}${t.status === 200 ? ' (the error view claims to be that page)' : ' (an address that is not a page)'}`; }
+  else if (h.canonical && /\/404(?:\.html)?\/?$/i.test(h.canonical)) target = ' — it names /404/, an address that should not exist as a page';
+  else if (h.canonical) { try { if (new URL(h.canonical, ctx.origin || 'https://x.invalid').pathname === '/') target = ' — it names the home page: the error view claims to be the home'; } catch { /* keep */ } }
+  fail('404-head', `${where} carries ${leaks.join('; ')}${target}. An error page names no canonical, no og:url and no alternates${noindex ? '' : ' — noindex is the only head tag it needs'}: emit them only on pages that are not noindex${H('404-head')}`);
+}
 async function loadSitemap(url, depth = 0, seen = new Set()) {
   if (seen.has(url) || depth > 2) return { urls: [], errors: [] }; seen.add(url);
   const r = await get(url); if (r.status !== 200) return { urls: [], errors: [`${url} → ${r.status || r.error}`] };
-  const urls = [], errors = [];
-  if (/<sitemapindex/i.test(r.text)) { for (const m of r.text.matchAll(/<sitemap>[\s\S]*?<loc>\s*([^<\s]+)\s*<\/loc>/gi)) { const sub = await loadSitemap(decode(m[1]), depth + 1, seen); urls.push(...sub.urls); errors.push(...sub.errors); } }
+  const urls = [], errors = [], children = []; let xhtml = /xmlns:xhtml|<xhtml:link/i.test(r.text);
+  if (/<sitemapindex/i.test(r.text)) { for (const m of r.text.matchAll(/<sitemap>[\s\S]*?<loc>\s*([^<\s]+)\s*<\/loc>/gi)) { const child = decode(m[1]); children.push(child); const sub = await loadSitemap(child, depth + 1, seen); urls.push(...sub.urls); errors.push(...sub.errors); xhtml = xhtml || sub.xhtml; } }
   else for (const m of r.text.matchAll(/<url>([\s\S]*?)<\/url>/gi)) { const loc = m[1].match(/<loc>\s*([^<\s]+)\s*<\/loc>/i)?.[1]; const lastmod = m[1].match(/<lastmod>\s*([^<\s]+)\s*<\/lastmod>/i)?.[1]; const alts = [...m[1].matchAll(/<xhtml:link[^>]*hreflang\s*=\s*"([^"]+)"[^>]*href\s*=\s*"([^"]+)"/gi)].map((a) => ({ lang: a[1], href: decode(a[2]) })); if (loc) urls.push({ loc: decode(loc), lastmod, alts, from: url }); }
-  return { urls, errors };
+  return { urls, errors, children, xhtml };
 }
 
 async function liveScan(input, hop = 0) {
@@ -783,7 +798,7 @@ async function liveScan(input, hop = 0) {
   if (opt.probe) {
     const rnd = `/senrigan-${Math.random().toString(36).slice(2, 10)}-not-here`; const r = await get(ctx.origin + rnd);
     const to = r.headers.location ? (abs(r.headers.location, ctx.origin + rnd) || r.headers.location).replace(ctx.origin, '') : '?';
-    if (r.status === 404 || r.status === 410) pass('unknown-path', `an unknown address answers ${r.status}`);
+    if (r.status === 404 || r.status === 410) { pass('unknown-path', `an unknown address answers ${r.status}`); if (/<html|<head/i.test(r.text)) await errorHead('the 404 page', r.text, true); }
     else if (r.status === 200) fail('unknown-path', `an unknown address (${rnd}) answers 200 — every typo and every deleted page becomes a page: Google reports soft 404s and may index the error view; answer 404 for routes that do not exist${H('unknown-path')}`);
     else if (r.status >= 300 && r.status < 400) fail('unknown-path', `an unknown address answers ${r.status} → ${to} — unknown paths are redirected instead of answering 404: Google treats a redirect to an unrelated page as a soft 404, and a broken link lands elsewhere without any error. Answer 404, and 301 only the old URLs you know${H('unknown-path')}`);
     else if (r.status >= 500) warn('unknown-path', `an unknown address answers ${r.status} — a server error where a 404 belongs`);
@@ -806,10 +821,11 @@ async function liveScan(input, hop = 0) {
   const smUrls = (groups.sitemaps || []).map((s) => abs(s, ctx.origin)).filter(Boolean); if (!smUrls.length) smUrls.push(`${ctx.origin}/sitemap-index.xml`, `${ctx.origin}/sitemap.xml`);
   let sitemap = { urls: [], errors: [] }; const smUsedList = []; const seenLoc = new Set();
   const declared = (groups.sitemaps || []).length > 0;
-  for (const s of smUrls) { const r = await loadSitemap(s); if (r.urls.length) { smUsedList.push(s); for (const u of r.urls) if (!seenLoc.has(u.loc)) { seenLoc.add(u.loc); sitemap.urls.push(u); } if (!declared) break; } else sitemap.errors.push(...r.errors); }
+  let smXhtml = false; const smChildren = [];
+  for (const s of smUrls) { const r = await loadSitemap(s); smXhtml = smXhtml || r.xhtml; smChildren.push(...r.children); if (r.urls.length) { smUsedList.push(s); for (const u of r.urls) if (!seenLoc.has(u.loc)) { seenLoc.add(u.loc); sitemap.urls.push(u); } if (!declared) break; } else sitemap.errors.push(...r.errors); }
   if (!sitemap.urls.length) fail('sitemap', `no usable sitemap (${sitemap.errors.slice(0, 2).join('; ') || 'empty'})`);
   else {
-    pass('sitemap', `sitemap${smUsedList.length > 1 ? 's' : ''} ${smUsedList.map((u) => new URL(u).pathname).join(' + ')}: ${sitemap.urls.length} URLs`);
+    pass('sitemap', `sitemap${smUsedList.length > 1 ? 's' : ''} ${smUsedList.map((u) => new URL(u).pathname).join(' + ')}: ${sitemap.urls.length} URL${sfx(sitemap.urls.length)}`);
     const foreign = sitemap.urls.filter((x) => !sameHost(x.loc)); if (foreign.length) fail('sitemap-host', `${foreign.length} sitemap URL${sfx(foreign.length)} on another host, e.g. ${foreign[0].loc} — Google ignores them`);
     const httpUrls = sitemap.urls.filter((x) => /^http:/i.test(x.loc)); if (httpUrls.length && ctx.https && !ctx.local) warn('sitemap-scheme', `${httpUrls.length} sitemap URL${sfx(httpUrls.length)} use http://`);
     const badMod = sitemap.urls.filter((x) => x.lastmod && isNaN(Date.parse(x.lastmod))); if (badMod.length) warn('sitemap-lastmod', `${badMod.length} invalid <lastmod> value${sfx(badMod.length)}, e.g. "${badMod[0].lastmod}"`);
@@ -820,6 +836,9 @@ async function liveScan(input, hop = 0) {
     const slashes = sitemap.urls.map((x) => new URL(x.loc).pathname).filter((p) => p !== '/' && !/\.[a-z0-9]{2,5}$/i.test(p)); const withSlash = slashes.filter((p) => p.endsWith('/')).length;
     if (slashes.length && withSlash && withSlash !== slashes.length) warn('sitemap-slash', `sitemap mixes trailing-slash styles (${withSlash} with, ${slashes.length - withSlash} without)`);
     for (const x of sitemap.urls) ctx.sitemapUrls.add(normKey(x.loc));
+    if (smXhtml) info('sitemap-view', 'the sitemap carries hreflang alternates (xhtml:link): a browser shows it as run-together text, the <loc> values seemingly glued (https://site/https://site/el/) — not an error; read it with view-source:');
+    // a clean sitemap still often looks broken in a new Search Console property: say so, so nobody hunts a problem that is not there
+    if (!results.some((x) => /^(robots|sitemap)/.test(x.id) && (x.level === 'fail' || x.level === 'warn'))) info('search-console', `sitemap and robots.txt are clean. In a new Search Console property the sitemap can read "Couldn't fetch" for hours or days${smChildren.length ? `, and an index (${smUsedList.map((u2) => new URL(u2).pathname).join(', ')}) reads "processed successfully" with 0 pages because the pages are on its children (${smChildren.slice(0, 3).map((c2) => new URL(c2).pathname).join(', ')}${smChildren.length > 3 ? ', …' : ''})` : ''} — the queue, not a fault. The real test: URL Inspection → Test live URL; "URL is available to Google" settles it`);
   }
   if (opt.probe) {
     const favs = ['/favicon.ico', '/apple-touch-icon.png'];
@@ -983,14 +1002,17 @@ async function distScan(dir) {
   let groups = [];
   if (!robotsF) warn('robots-file', 'no robots.txt in the output — crawlers assume "allow all", but the Sitemap line has nowhere to live'); else { groups = parseRobots(readFileSync(robotsF, 'utf8')); robotsReport(groups); ctx.robotsGroups = groups; if (!groups.sitemaps) warn('robots-sitemap', 'robots.txt without a Sitemap: line'); }
   // without a 404 page the host decides what an unknown path is — Cloudflare Pages then serves the site as a single-page app (200 + the home page for every path)
-  if (files.some((f) => rel(f) === '/404.html')) pass('unknown-path', '404.html in the output — unknown paths can answer 404'); else warn('unknown-path', 'no 404.html in the output — the host decides what an unknown path is; Cloudflare Pages then treats the site as a single-page app and answers every unknown path with 200 and the home page (a soft 404 for each typo): ship a 404.html');
+  const f404 = files.find((f) => rel(f) === '/404.html') || routes.get(normPath('/404'));
+  if (f404) { pass('unknown-path', '404.html in the output — unknown paths can answer 404'); await errorHead(rel(f404), readFileSync(f404, 'utf8'), false); } else warn('unknown-path', 'no 404.html in the output — the host decides what an unknown path is; Cloudflare Pages then treats the site as a single-page app and answers every unknown path with 200 and the home page (a soft 404 for each typo): ship a 404.html');
   const smF = files.filter((f) => /^\/sitemap[^/]*\.xml$/i.test(rel(f)));
   const smUrls = [];
-  for (const f of smF) { const t = readFileSync(f, 'utf8'); for (const m of t.matchAll(/<url>([\s\S]*?)<\/url>/gi)) { const loc = m[1].match(/<loc>\s*([^<\s]+)\s*<\/loc>/i)?.[1]; const lastmod = m[1].match(/<lastmod>\s*([^<\s]+)\s*<\/lastmod>/i)?.[1]; if (loc) smUrls.push({ loc: decode(loc), lastmod }); } }
+  let smXhtmlD = false;
+  for (const f of smF) { const t = readFileSync(f, 'utf8'); if (/xmlns:xhtml|<xhtml:link/i.test(t)) smXhtmlD = true; for (const m of t.matchAll(/<url>([\s\S]*?)<\/url>/gi)) { const loc = m[1].match(/<loc>\s*([^<\s]+)\s*<\/loc>/i)?.[1]; const lastmod = m[1].match(/<lastmod>\s*([^<\s]+)\s*<\/lastmod>/i)?.[1]; if (loc) smUrls.push({ loc: decode(loc), lastmod }); } }
   if (!smF.length) fail('sitemap', 'no sitemap*.xml in the output');
   else if (!smUrls.length) info('sitemap', `${smF.length} sitemap file${sfx(smF.length)} but no <url> entries here (an index pointing elsewhere?)`);
   else {
     pass('sitemap', `${smF.length} sitemap file${sfx(smF.length)}, ${smUrls.length} URL${sfx(smUrls.length)}`);
+    if (smXhtmlD) info('sitemap-view', 'the sitemap carries hreflang alternates (xhtml:link): a browser shows it as run-together text, the <loc> values seemingly glued — not an error; read it with view-source:');
     const paths = smUrls.map((x) => { try { return new URL(x.loc).pathname; } catch { return x.loc; } });
     const missing = paths.filter((p) => !routes.has(normPath(p)) && !routes.has(normPath(p + '/')) && !routes.has(normPath(p.replace(/\.html?$/i, '')))); if (missing.length) fail('sitemap-404', `${missing.length} sitemap URL${sfx(missing.length)} have no file in the output`, missing.slice(0, 8).join('\n'));
     if (opt.base) { const foreign = smUrls.filter((x) => { try { return new URL(x.loc).origin !== opt.base; } catch { return true; } }); if (foreign.length) fail('sitemap-host', `${foreign.length} sitemap URL${sfx(foreign.length)} not on ${opt.base}, e.g. ${foreign[0].loc}`); }
@@ -1258,7 +1280,7 @@ const labelOf = (r) => { const l = r.msg.match(/^(\/\S*): /)?.[1] ?? null; retur
 //   DILUTED   — it can be indexed, but its signals are split, contradictory or lost
 //   DEGRADED  — it is indexed as it is, but shown worse than it could be
 const INVISIBLE = new Set(['spa-empty', 'crawl-robots', 'fetch', 'status', 'robots', 'x-robots', 'noindex', 'canonical-file', 'canonical-redirect', 'hreflang-file', 'sitemap-robots', 'inner', 'sitemap-404', 'sitemap-host']);
-const DILUTED = new Set(['unknown-path', 'host-redirect', 'title-width', 'crawl-none', 'crawl-gap', 'crawl-404', 'crawl-5xx', 'crawl-redirect', 'crawl-budget', 'canonical-host', 'link-redirect', 'robots-default-deny', 'jsonld-product', 'alias', 'https', 'canonical', 'canonical-slash', 'canonical-html', 'title-dup', 'description-dup', 'hreflang', 'hreflang-recip', 'lang', 'lang-script', 'h1', 'h-empty', 'slash', 'sitemap', 'sitemap-slash', 'sitemap-scheme', 'sitemap-gap', 'inner-redirect', 'broken', 'orphan', 'nofollow', 'nofollow-meta', 'mixed', 'jsonld-syntax', 'jsonld-context', 'jsonld-h1', 'jsonld-article', 'jsonld-legal', 'terms-link', 'og-url', 'thin', 'fake-link']);
+const DILUTED = new Set(['404-head', 'unknown-path', 'host-redirect', 'title-width', 'crawl-none', 'crawl-gap', 'crawl-404', 'crawl-5xx', 'crawl-redirect', 'crawl-budget', 'canonical-host', 'link-redirect', 'robots-default-deny', 'jsonld-product', 'alias', 'https', 'canonical', 'canonical-slash', 'canonical-html', 'title-dup', 'description-dup', 'hreflang', 'hreflang-recip', 'lang', 'lang-script', 'h1', 'h-empty', 'slash', 'sitemap', 'sitemap-slash', 'sitemap-scheme', 'sitemap-gap', 'inner-redirect', 'broken', 'orphan', 'nofollow', 'nofollow-meta', 'mixed', 'jsonld-syntax', 'jsonld-context', 'jsonld-h1', 'jsonld-article', 'jsonld-legal', 'terms-link', 'og-url', 'thin', 'fake-link']);
 const tierOf = (r) => (r.level === 'pass' || r.level === 'info') ? '' : INVISIBLE.has(r.id) && !(r.id === 'noindex' && r.level === 'warn' && !/sitemap/.test(r.msg)) ? 'INVISIBLE' : DILUTED.has(r.id) ? 'DILUTED' : 'DEGRADED';
 for (const r of results) r.tier = tierOf(r);
 const tiers = { INVISIBLE: 0, DILUTED: 0, DEGRADED: 0 }; for (const r of results) if (r.tier) tiers[r.tier]++;

@@ -469,5 +469,13 @@ What the grade looks at, and what to do on a page builder:
 - [ ] share one URL in a chat app and look at the card
 - [ ] Search Console: request indexing for changed URLs; read coverage in a
       week
+- [ ] the 404 page: answers 404, carries `noindex`, and no canonical /
+      og:url / hreflang (layouts copy the home's set onto it)
+- [ ] a domain with a past (bought, re-registered, a previous site): in
+      Search Console check Manual actions, Links (spam backlinks) and Pages,
+      and remove sitemaps an earlier owner submitted — they show up for years
+- [ ] a new property reading "Couldn't fetch" on a sitemap senrigan calls
+      clean is the queue: URL Inspection → Test live URL decides; a sitemap
+      index counts 0 pages itself, its children carry them
 - [ ] where there is an access log: `senrigan https://host --logs <log>`
       after a week or more — did the engines come, and what did they miss?

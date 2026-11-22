@@ -58,6 +58,11 @@ or clone and run `node bin/senrigan.mjs <target>`.
   every deleted page into a soft 404 — a failure. In `dist/` mode a missing
   `404.html` is reported: Cloudflare Pages then serves the site as a
   single-page app, 200 and the home page for every unknown path
+- the **404 page's head**: a layout that stamps canonical, `og:url` and
+  hreflang on every page also stamps them on the error page, which then
+  names the home (or `/404/`, an address that is not a page) as what it is —
+  a failure, live on the probe's 404 response and in `dist/` on `404.html`.
+  An error page carries none of them; `noindex` is all it needs
 - single-page apps (Vite / React, Lovable): a served HTML that is an empty
   app root (`<div id="root"></div>`) is INVISIBLE — a crawler's first pass and
   most AI agents see an empty page; checked on every sampled route. A
@@ -80,6 +85,13 @@ or clone and run `node bin/senrigan.mjs <target>`.
   timestamp, which Google learns to ignore), mixed trailing-slash styles,
   listed URLs that redirect or 404, indexable pages that are not listed
 - all `Sitemap:` lines are merged, the same URL listed twice is read once
+- a sitemap with hreflang alternates (`xhtml:link`) gets a note: browsers
+  render it as run-together text, the `<loc>` values seemingly glued — not an
+  error, read it with `view-source:`
+- when robots.txt and the sitemap are clean, one note for Search Console: a
+  new property can read "Couldn't fetch" for hours or days, and a sitemap
+  index "processed successfully" with 0 pages because its pages are on the
+  children (named in the note) — URL Inspection → Test live URL is the test
 - `favicon.ico`, `apple-touch-icon.png`, declared icons and the web manifest
   answer 200 (devices request them blindly; each 404 is wasted crawl)
 - the home document's size (a multi-megabyte HTML page is reported)
