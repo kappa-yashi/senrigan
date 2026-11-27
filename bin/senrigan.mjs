@@ -29,7 +29,7 @@ import { join, relative, extname, dirname, sep } from 'node:path';
 // ───────────────────────────── cli ─────────────────────────────
 const argv = process.argv.slice(2);
 const opt = { json: false, summary: false, out: '', strict: false, pages: 8, semantic: false, probe: true, base: '', mode: '', logs: [] };
-const VERSION = '0.9.0';
+const VERSION = '0.10.0';
 const KNOWN_FLAGS = ['--version', '-v', '--json', '--summary', '--out', '--strict', '--pages', '--semantic', '--no-probe', '--base', '--dist', '--logs', '-h', '--help'];
 const similar = (a) => KNOWN_FLAGS.map((f) => [f, [...f].filter((ch, i) => a[i] === ch).length / Math.max(f.length, a.length)]).sort((x, y) => y[1] - x[1])[0];
 let target = '';
@@ -124,7 +124,17 @@ function inspect(html) {
   const body = (html.match(/<body\b[^>]*>([\s\S]*)<\/body>/i) || [, html])[1];
   // an inline <svg> becomes its accessible name (aria-label or <title>), so a wordmark inside an <h1> or <a> still counts as text
   const svgName = (svg) => { const open = svg.match(/<svg\b([^>]*)>/i)?.[1] || ''; return attr(open, 'aria-label') || stripTags(svg.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || '') || ''; };
-  const clean = body.replace(/<!--[\s\S]*?-->/g, '').replace(/<(script|style|noscript|template)\b[\s\S]*?<\/\1>/gi, '').replace(/<svg\b[\s\S]*?<\/svg>/gi, (svg) => ` ${svgName(svg)} `);
+  const noComments = body.replace(/<!--[\s\S]*?-->/g, '');
+  // every id in the body, svg and template content included: aria-labelledby / aria-describedby are resolved against it
+  const rawIds = new Set([...noComments.matchAll(/\sid\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/gi)].map((m) => decode(m[1] ?? m[2] ?? m[3])));
+  // <svg role="img"> announces "image": without aria-label, a resolvable aria-labelledby or a <title> it is an image with no name
+  let svgUnnamed = 0;
+  for (const m of noComments.matchAll(/<svg\b([^>]*)>([\s\S]*?)<\/svg>/gi)) {
+    const a = m[1]; if (!/\brole\s*=\s*["']?img\b/i.test(a) || /aria-hidden\s*=\s*["']?true/i.test(a)) continue;
+    const lb = (attr(a, 'aria-labelledby') || '').split(/\s+/).filter(Boolean);
+    if (!attr(a, 'aria-label') && !(lb.length && lb.some((id) => rawIds.has(id))) && !stripTags(m[2].match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || '')) svgUnnamed++;
+  }
+  const clean = noComments.replace(/<(script|style|noscript|template)\b[\s\S]*?<\/\1>/gi, '').replace(/<svg\b[\s\S]*?<\/svg>/gi, (svg) => ` ${svgName(svg)} `);
   // real heading tags and role="heading" elements, in document order (a <div role="heading" aria-level="1"> is still an h1 to assistive tech and to the outline)
   for (const m of clean.matchAll(/<h([1-6])\b([^>]*)>([\s\S]*?)<\/h\1>|<(div|span|p|strong|b)\b([^>]*\brole\s*=\s*["']heading["'][^>]*)>([\s\S]*?)<\/\4>/gi)) {
     if (m[1]) { o.headings.push({ level: Number(m[1]), text: stripTags(m[3].replace(/<img\b([^>]*)>/gi, (x, a) => attr(a, 'alt') || '')) || attr(m[2], 'aria-label') || '', attrs: m[2] }); continue; }
@@ -158,7 +168,7 @@ function inspect(html) {
   if (/\/wp-content\//.test(html)) o.assetHosts.add('wp-content'); if (/\/_astro\//.test(html)) o.assetHosts.add('_astro'); if (/\/_next\//.test(html)) o.assetHosts.add('_next');
   const noChrome = (mainM ? mainM[1] : clean).replace(/<(nav|header|footer|aside|form)\b[\s\S]*?<\/\1>/gi, '');
   o.mainText = stripTags(noChrome); o.text = stripTags(clean);
-  o.markup = analyzeMarkup(clean, html.length, o.text);
+  o.markup = analyzeMarkup(clean, html.length, o.text, { ids: rawIds, svgUnnamed });
   return o;
 }
 
@@ -170,7 +180,7 @@ function inspect(html) {
 const ARIA_ROLES = new Set('alert alertdialog application article banner blockquote button caption cell checkbox code columnheader combobox complementary contentinfo definition deletion dialog directory document emphasis feed figure form generic grid gridcell group heading img image insertion link list listbox listitem log main marquee math menu menubar menuitem menuitemcheckbox menuitemradio meter navigation none note option paragraph presentation progressbar radio radiogroup region row rowgroup rowheader scrollbar search searchbox separator slider spinbutton status strong subscript superscript switch tab table tablist tabpanel term textbox time timer toolbar tooltip tree treegrid treeitem'.split(' '));
 const TEXT_BLOCKS = new Set(['p', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'td', 'th', 'dd', 'dt', 'blockquote', 'figcaption', 'caption', 'label', 'button', 'a', 'pre', 'code', 'summary', 'legend', 'q', 'cite', 'time', 'address', 'option', 'small', 'strong', 'em', 'b', 'i', 'mark', 'abbr']);
 const BUILDERS = [['Elementor', /\belementor-/], ['Divi', /\bet_pb_/], ['WPBakery', /\b(?:vc_row|wpb_)/], ['Oxygen', /\b(?:ct-section|oxy-)/], ['Bricks', /\bbrxe-/], ['Beaver Builder', /\bfl-(?:row|col|module)/], ['Webflow', /\bw-(?:layout|nav|container|richtext)/], ['Wix', /\b(?:wixui-|comp-[a-z0-9]{6,})/], ['Framer', /\bframer-/], ['Squarespace', /\bsqs-/]];
-function analyzeMarkup(clean, htmlLen, text) {
+function analyzeMarkup(clean, htmlLen, text, extra = {}) {
   // a tolerant tree: enough to see who wraps whom
   const root = { tag: '#root', attrs: '', kids: [], text: 0, parent: null }; let cur = root; const all = [];
   for (const m of clean.matchAll(/<(\/?)([a-zA-Z][\w:-]*)\b([^>]*?)(\/?)>|([^<]+)/g)) {
@@ -200,7 +210,12 @@ function analyzeMarkup(clean, htmlLen, text) {
   const dupIds = [...ids.entries()].filter(([, c]) => c > 1).map(([id]) => id);
   const labelFor = new Set(all.filter((n) => n.tag === 'label').map((n) => attr(n.attrs, 'for')).filter(Boolean));
   const inLabel = (n) => { let a = n.parent; while (a) { if (a.tag === 'label') return true; a = a.parent; } return false; };
-  const named = (n) => attr(n.attrs, 'aria-label') || attr(n.attrs, 'aria-labelledby') || attr(n.attrs, 'title');
+  // aria-labelledby names an element only when at least one id it points to is on the page — a dangling reference reads as nothing
+  const knownIds = extra.ids || new Set(ids.keys());
+  const refs = (v) => (v || '').split(/\s+/).filter(Boolean);
+  const named = (n) => attr(n.attrs, 'aria-label') || refs(attr(n.attrs, 'aria-labelledby')).some((id) => knownIds.has(id)) || attr(n.attrs, 'title');
+  const missingRefs = [...new Set(all.flatMap((n) => [...refs(attr(n.attrs, 'aria-labelledby')), ...refs(attr(n.attrs, 'aria-describedby'))].filter((id) => !knownIds.has(id))))];
+  const svgUnnamed = extra.svgUnnamed || 0;
   // aria-hidden hides from assistive tech only; hidden / inert / display:none take the element out of the tab order as well
   const up = (n, test) => { let a = n; while (a && a.tag !== '#root') { if (test(a)) return true; a = a.parent; } return false; };
   const ariaHidden = (n) => up(n, (a) => /aria-hidden\s*=\s*["']?true/i.test(a.attrs));
@@ -223,6 +238,11 @@ function analyzeMarkup(clean, htmlLen, text) {
   const hiddenDup = hiddenFocus >= 5 || (hiddenFocus > 0 && unlabeledList.some(ariaHidden));
   const iframesNoTitle = all.filter((n) => n.tag === 'iframe' && !attr(n.attrs, 'title')).length;
   const autoplay = all.filter((n) => n.tag === 'video' && attr(n.attrs, 'autoplay') != null && attr(n.attrs, 'muted') == null).length;
+  const desc = (n) => n.kids.flatMap((k) => [k, ...desc(k)]);
+  // a data table without <th> reads as a run of cells; a layout table should say role="presentation"
+  const tablesNoTh = all.filter((n) => { if (n.tag !== 'table' || removed(n) || /\brole\s*=\s*["']?(?:presentation|none)\b/i.test(n.attrs)) return false; const d = desc(n); return !d.some((k) => k.tag === 'th') && d.filter((k) => k.tag === 'tr').length >= 2 && d.filter((k) => k.tag === 'td').length >= 4; }).length;
+  // speech without captions is lost to deaf viewers and to everyone with the sound off; a muted video carries no speech
+  const noCaptions = all.filter((n) => n.tag === 'video' && !removed(n) && attr(n.attrs, 'muted') == null && !desc(n).some((k) => k.tag === 'track' && /^(captions|subtitles)$/i.test(attr(k.attrs, 'kind') || ''))).length;
   const badRoles = [...new Set(all.map((n) => (attr(n.attrs, 'role') || '').split(/\s+/)[0]).filter((r) => r && !ARIA_ROLES.has(r) && !/^(doc|graphics)-/.test(r)))];
   // controls crawlers cannot follow
   // navigation: <nav>/<header>/role=navigation, or what page builders call it in class and id (menu, nav, header)
@@ -260,6 +280,10 @@ function analyzeMarkup(clean, htmlLen, text) {
   P(iframesNoTitle ? 3 : 0, `${iframesNoTitle} iframe${iframesNoTitle > 1 ? 's' : ''} without title`, 'iframe');
   P(autoplay ? 3 : 0, `${autoplay} autoplaying video${autoplay > 1 ? 's' : ''} with sound`, 'autoplay');
   P(badRoles.length ? 3 : 0, `invalid role${badRoles.length > 1 ? 's' : ''}: ${badRoles.slice(0, 3).join(', ')}`, 'roles');
+  P(missingRefs.length ? Math.min(10, missingRefs.length * 3) : 0, `aria-labelledby / aria-describedby → missing id${missingRefs.length > 1 ? 's' : ''}: ${missingRefs.slice(0, 3).join(', ')}`, 'ariaref');
+  P(svgUnnamed ? Math.min(6, svgUnnamed * 3) : 0, `${svgUnnamed} <svg role="img"> without a name`, 'svgname');
+  P(tablesNoTh ? 3 : 0, `${tablesNoTh} table${tablesNoTh > 1 ? 's' : ''} without <th>`, 'table');
+  P(noCaptions ? 3 : 0, `${noCaptions} video${noCaptions > 1 ? 's' : ''} with sound and no captions track`, 'captions');
   P(Math.min(30, fake.length * 15), fake.length ? `${fake.length} click target${fake.length > 1 ? 's' : ''} that ${fake.length > 1 ? 'are not links' : 'is not a link'}${fakeNav ? ` (${fakeNav} in the navigation)` : ''}` : '', 'fake');
   const score = Math.max(0, 100 - pen.reduce((x, [p]) => x + p, 0));
   const flag = fakeNav || score < 50 ? 'RED' : score < 80 ? 'YELLOW' : 'GREEN';
@@ -267,7 +291,7 @@ function analyzeMarkup(clean, htmlLen, text) {
   const notes = [];
   if (honeyTab) notes.push(['honeypot', `anti-spam honeypot field recognised (not counted) — add tabindex="-1" and autocomplete="off" so keyboard users never land in it`]);
   if (hiddenDup) notes.push(['hidden-dup', `${hiddenFocus} links/fields are focusable inside aria-hidden — hidden duplicate content (a language toggle or a mobile copy?): use the hidden attribute or inert, which also take it out of the tab order; aria-hidden only silences it`]);
-  return { altEmpty, score, flag, reasons: pen.map(([, w]) => w), keys: pen.map(([, , k]) => k), notes, nodes: all.length, words, npw, chains, longest, looseShare, landmarks: { main: mains, nav: navs, header: headers, footer: footers }, skip, builder, fake: fake.length, fakeNav, a11y: { unlabeled, nameless, dupIds: dupIds.length, posTab, hiddenFocus, honeypots: honey.length, iframesNoTitle, autoplay, badRoles } };
+  return { altEmpty, score, flag, reasons: pen.map(([, w]) => w), keys: pen.map(([, , k]) => k), notes, nodes: all.length, words, npw, chains, longest, looseShare, landmarks: { main: mains, nav: navs, header: headers, footer: footers }, skip, builder, fake: fake.length, fakeNav, a11y: { unlabeled, nameless, dupIds: dupIds.length, posTab, hiddenFocus, honeypots: honey.length, iframesNoTitle, autoplay, badRoles, missingRefs, svgUnnamed, tablesNoTh, noCaptions } };
 }
 
 // ───────────────────────────── shared page checks (Layers 1, 2, 4, 5) ─────────────────────────────
@@ -366,7 +390,9 @@ function pageChecks(h, pageUrl, label) {
   const isAlt = (prev) => altKeys.has(prev) || !!ctx.alts.get(prev)?.has(selfKey);
   section('Head & rendering');
   if (!h.lang) fail('lang', `${L}<html> has no lang attribute${H('lang')}`); else if (!/^[a-z]{2,3}(-[A-Za-z0-9]{2,8})*$/.test(h.lang)) warn('lang', `${L}lang="${h.lang}" is not a BCP 47 tag`); else pass('lang', `${L}lang="${h.lang}"`);
-  if (!h.viewport) fail('viewport', `${L}no <meta name="viewport"> — mobile rendering and mobile-first indexing suffer`); else if (!/width=device-width/i.test(h.viewport)) warn('viewport', `${L}viewport "${h.viewport}" lacks width=device-width`); else if (/user-scalable=no|maximum-scale=1(?:\.0)?\b/i.test(h.viewport)) warn('viewport', `${L}viewport blocks zoom (${h.viewport}) — accessibility flag`); else pass('viewport', `${L}viewport ok`);
+  if (!h.viewport) fail('viewport', `${L}no <meta name="viewport"> — mobile rendering and mobile-first indexing suffer`); else if (!/width=device-width/i.test(h.viewport)) warn('viewport', `${L}viewport "${h.viewport}" lacks width=device-width`); else pass('viewport', `${L}viewport ok`);
+  // zoom is how people with low vision read: user-scalable=no, or a maximum-scale under 2, takes it away (WCAG 1.4.4 asks for 200%)
+  if (h.viewport) { const ms = h.viewport.match(/maximum-scale\s*=\s*([\d.]+)/i); if (/user-scalable\s*=\s*(?:no|0)\b/i.test(h.viewport) || (ms && Number(ms[1]) < 2)) fail('viewport-zoom', `${L}viewport blocks zoom ("${h.viewport}") — people with low vision cannot enlarge the page (WCAG 1.4.4 asks for 200%): remove user-scalable=no and maximum-scale${H('viewport-zoom')}`); }
   // title
   if (h.title == null || !h.title) fail('title', `${L}no <title>`);
   else {
@@ -563,6 +589,115 @@ function markupChecks(h, L) {
   results.push({ section: cur.section, level: m.flag === 'GREEN' ? 'pass' : 'warn', id: 'markup', msg, detail: m.flag === 'GREEN' ? undefined : detail, flag: m.flag, score: m.score });
   if (m.fakeNav) fail('fake-link', `${L}${m.fakeNav} navigation item${sfx(m.fakeNav)} ${m.fakeNav === 1 ? 'is a click handler, not a link — crawlers cannot follow it' : 'are click handlers, not links — crawlers cannot follow them'}; the pages behind them are reachable only through the sitemap`);
   for (const [id, msg2] of m.notes || []) (id === 'hidden-dup' ? warn : info)(id, `${L}${msg2}`);
+}
+
+// ───────────────────────────── stylesheet accessibility (static heuristics, no browser) ─────────────────────────────
+// What a stylesheet alone can say: a removed focus ring with nothing in its place, animation with no reduced-motion
+// branch, and colour pairs whose contrast is computable (literal colours or custom-property tokens, per theme).
+// Real contrast depends on layout and what sits behind the text — this is a floor, not an audit.
+function cssRules(css) {
+  const out = [];
+  const walkCss = (s, media) => {
+    let i = 0;
+    while (i < s.length) {
+      const open = s.indexOf('{', i); if (open < 0) break;
+      const head = s.slice(i, open).split(';').pop().trim().replace(/^}+/, '').trim();
+      let d = 1, j = open + 1; while (j < s.length && d) { if (s[j] === '{') d++; else if (s[j] === '}') d--; j++; }
+      const inner = s.slice(open + 1, j - 1);
+      if (/^@(media|supports|layer|container|scope|document)\b/i.test(head)) walkCss(inner, /^@media/i.test(head) ? `${media} ${head}` : media);
+      else if (!head.startsWith('@')) { const decls = new Map(); for (const part of inner.replace(/\{[^{}]*\}/g, '').split(';')) { const k = part.indexOf(':'); if (k > 0) decls.set(part.slice(0, k).trim().toLowerCase(), part.slice(k + 1).replace(/\s*!important\s*$/i, '').trim()); } out.push({ sel: head, media, decls }); }
+      i = j;
+    }
+  };
+  walkCss(css.replace(/\/\*[\s\S]*?\*\//g, ''), '');
+  return out;
+}
+const NAMED_COLORS = { white: '#ffffff', black: '#000000', red: '#ff0000', gray: '#808080', grey: '#808080', silver: '#c0c0c0', navy: '#000080', blue: '#0000ff', green: '#008000', yellow: '#ffff00', orange: '#ffa500', purple: '#800080', maroon: '#800000', teal: '#008080', lime: '#00ff00', aqua: '#00ffff', fuchsia: '#ff00ff', olive: '#808000', whitesmoke: '#f5f5f5', gainsboro: '#dcdcdc', lightgray: '#d3d3d3', lightgrey: '#d3d3d3', darkgray: '#a9a9a9', darkgrey: '#a9a9a9', dimgray: '#696969', dimgrey: '#696969' };
+// a colour as linear-light sRGB + alpha (hex, rgb(), hsl(), oklch(), oklab(), a few names); null when it cannot be known statically
+function parseColor(v) {
+  v = String(v || '').trim().toLowerCase(); if (NAMED_COLORS[v]) v = NAMED_COLORS[v];
+  const lin = (c) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+  const num = (x, scale = 1) => (/%$/.test(x) ? parseFloat(x) / 100 * scale : parseFloat(x));
+  const alphaOf = (x) => (x == null ? 1 : num(x, 1));
+  let m = v.match(/^#([0-9a-f]{3,8})$/);
+  if (m) { let h = m[1]; if (h.length <= 4) h = [...h].map((c) => c + c).join(''); if (h.length !== 6 && h.length !== 8) return null; const n = (k) => parseInt(h.slice(k, k + 2), 16) / 255; return { lin: [lin(n(0)), lin(n(2)), lin(n(4))], a: h.length === 8 ? n(6) : 1 }; }
+  const args = (s) => s.replace(/[,/]/g, ' ').trim().split(/\s+/);
+  m = v.match(/^rgba?\(([^)]+)\)$/);
+  if (m) { const p = args(m[1]); if (p.length < 3) return null; const c = p.slice(0, 3).map((x) => num(x, 255) / 255); return c.some(isNaN) ? null : { lin: c.map(lin), a: alphaOf(p[3]) }; }
+  m = v.match(/^hsla?\(([^)]+)\)$/);
+  if (m) { const p = args(m[1]); const hh = parseFloat(p[0]) / 360, s = num(p[1], 1), l = num(p[2], 1); if ([hh, s, l].some(isNaN)) return null; const f = (k) => { const t = (k + hh * 12) % 12; return l - s * Math.min(l, 1 - l) * Math.max(-1, Math.min(t - 3, 9 - t, 1)); }; return { lin: [f(0), f(8), f(4)].map(lin), a: alphaOf(p[3]) }; }
+  m = v.match(/^ok(lch|lab)\(([^)]+)\)$/);
+  if (m) {
+    const p = args(m[2]); const L = num(p[0], 1); let a, b;
+    if (m[1] === 'lch') { const C = num(p[1], 0.4), H = parseFloat(p[2]) * Math.PI / 180; a = C * Math.cos(H); b = C * Math.sin(H); } else { a = num(p[1], 0.4); b = num(p[2], 0.4); }
+    if ([L, a, b].some(isNaN)) return null;
+    const l = (L + 0.3963377774 * a + 0.2158037573 * b) ** 3, mm = (L - 0.1055613458 * a - 0.0638541728 * b) ** 3, s = (L - 0.0894841775 * a - 1.2914855480 * b) ** 3;
+    const c = [4.0767416621 * l - 3.3077115913 * mm + 0.2309699292 * s, -1.2684380046 * l + 2.6097574011 * mm - 0.3413193965 * s, -0.0041960863 * l - 0.7034186147 * mm + 1.7076147010 * s].map((x) => Math.min(1, Math.max(0, x)));
+    return { lin: c, a: alphaOf(p[3]) };
+  }
+  return null;
+}
+const luminance = (c) => 0.2126 * c.lin[0] + 0.7152 * c.lin[1] + 0.0722 * c.lin[2];
+const contrastRatio = (a, b) => { const x = luminance(a), y = luminance(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); };
+function cssChecks(cssTexts, jsReduced, where) {
+  const css = cssTexts.join('\n'); if (!css.trim()) return;
+  section('Markup & accessibility');
+  // print, forced-colours and high-contrast branches are not the screen theme
+  const rules = cssRules(css).filter((r) => !/\bprint\b|forced-colors|prefers-contrast|-ms-high-contrast/i.test(r.media));
+  // focus: a rule that removes the outline on focus (or on every element) with no :focus-visible style anywhere
+  const noOutline = (d) => /^(?:none|0(?:px)?)$/i.test(d.get('outline') || '') || /^none$/i.test(d.get('outline-style') || '') || /^0(?:px)?$/.test(d.get('outline-width') || '');
+  const drawsFocus = (d) => ['box-shadow', 'border', 'border-color', 'border-bottom', 'text-decoration', 'background', 'background-color'].some((k) => d.has(k) && !/^(?:none|0|transparent)$/i.test(d.get(k)));
+  const removers = rules.filter((r) => noOutline(r.decls) && !drawsFocus(r.decls) && r.sel.split(',').some((s) => !/tabindex\s*=\s*["']?-1/.test(s) &&  /:focus(?!-visible|-within)/.test(s) && !/:not\(:focus-visible\)/.test(s) || /^\s*(?:\*|a|button|input|select|textarea|\[tabindex[^\]]*\])\s*$/i.test(s)));
+  const restored = rules.some((r) => /:focus-visible/.test(r.sel) && !noOutline(r.decls)) || rules.some((r) => /:focus(?!-within)/.test(r.sel) && !noOutline(r.decls) && (r.decls.has('outline') || r.decls.has('box-shadow') || r.decls.has('border-color')));
+  if (removers.length && !restored) warn('focus-outline', `${where}the stylesheet removes the focus outline (${[...new Set(removers.map((r) => r.sel.slice(0, 40)))].slice(0, 3).join(' · ')}) and draws no :focus-visible style — keyboard users cannot see where they are: style :focus-visible instead of removing the ring`);
+  else if (removers.length) pass('focus-outline', `${where}focus outline replaced by a :focus / :focus-visible style`);
+  // motion: @keyframes or smooth scrolling with no prefers-reduced-motion branch in CSS or script
+  const keyframes = (css.match(/@(?:-webkit-)?keyframes\s+[\w-]+/gi) || []).length;
+  const smooth = rules.some((r) => /^smooth$/i.test(r.decls.get('scroll-behavior') || ''));
+  const reduced = /prefers-reduced-motion/i.test(css) || jsReduced;
+  if ((keyframes || smooth) && !reduced) warn('reduced-motion', `${where}${keyframes ? `${keyframes} @keyframes animation${sfx(keyframes)}` : ''}${keyframes && smooth ? ' and ' : ''}${smooth ? 'scroll-behavior: smooth' : ''} with no prefers-reduced-motion branch${jsReduced === null ? ' in the stylesheets (a script may still handle it)' : ''} — motion that cannot be turned off makes some visitors sick: wrap it in @media (prefers-reduced-motion: no-preference) or switch it off under reduce`);
+  else if (keyframes || smooth) pass('reduced-motion', `${where}animation respects prefers-reduced-motion`);
+  // contrast: tokens resolved per theme, pairs from rules that set both colours, text rules against the page background.
+  // A theme is a root selector variant (html[data-theme="green"], .dark, .theme-x) or the dark colour-scheme branch; the base is plain :root / html / body
+  const rootish = (s) => /^(?::root|html|body|:host)(?:[:.[][^\s>+~]*)?$/i.test(s) || /^\[data-(?:theme|mode|color-scheme)[^\]]*\]$/i.test(s) || /^\.(?:dark|light|theme-[\w-]+)$/i.test(s);
+  const keyOf = (s, media) => { const x = s.replace(/:not\([^)]*\)/gi, ''); const k = x.match(/\[data-(?:theme|mode|color-scheme)\s*=\s*["']?([\w-]+)/i)?.[1] || x.match(/\.theme-([\w-]+)/i)?.[1] || x.match(/\.(dark|light)\b/i)?.[1] || ''; return (k || (/prefers-color-scheme\s*:\s*dark/i.test(media) ? 'dark' : '')).toLowerCase(); };
+  const ruleKeys = (r) => new Set(r.sel.split(',').map((s) => keyOf(s.trim(), r.media)));
+  const rootRules = rules.filter((r) => r.sel.split(',').map((s) => s.trim()).some(rootish));
+  const themeNames = ['', ...new Set(rootRules.flatMap((r) => [...ruleKeys(r)]).filter(Boolean))].slice(0, 13);
+  const themes = themeNames.map((t) => [t, rootRules.filter((r) => { const k = ruleKeys(r); return (k.has('') && !/prefers-color-scheme\s*:\s*dark/i.test(r.media)) || (t && k.has(t)); })]);
+  const bgOf = (d) => d.get('background-color') || (parseColor(d.get('background')) || /^var\(/.test(d.get('background') || '') ? d.get('background') : null);
+  const big = (r) => { const fs = r.decls.get('font-size') || ''; const px = /rem$/.test(fs) ? parseFloat(fs) * 16 : /px$/.test(fs) ? parseFloat(fs) : 0; const bold = /^(?:bold|[6-9]00)$/.test(r.decls.get('font-weight') || ''); return px >= 24 || (bold && px >= 18.6) || /^h[1-3]\b/i.test(r.sel); };
+  const TEXTY = /^(?:body|p|a|small|li|h[1-6]|blockquote|figcaption|caption|label|td|th|dd|dt|time|cite|em|strong|span)(?:[:.[][^\s]*)?$|\.(?:[\w-]*(?:muted|meta|caption|subtle|secondary|hint|byline|date|dim|faint|lead|excerpt)[\w-]*)/i;
+  const pairs = [];
+  for (const r of rules) {
+    if (/:hover|:active|:disabled|\[disabled\]|::?placeholder|::selection|:visited|::?(?:before|after|marker)\b/i.test(r.sel)) continue;
+    const fg = r.decls.get('color'); if (!fg) continue; const bg = bgOf(r.decls);
+    // a pair written for one theme (.dark .card, [data-theme=green] .x, inside the dark branch) is judged in that theme only
+    const first = r.sel.split(',')[0].trim(); const theme = keyOf(first, r.media);
+    const base = r.sel.replace(/(?:\.(?:dark|light|theme-[\w-]+)|(?:html)?\[data-(?:theme|mode|color-scheme)[^\]]*\]|:root)\s+/gi, '').trim();
+    if (bg) pairs.push({ sel: r.sel, base, fg, bg, big: big(r), page: false, theme });
+    else if (rootish(first)) pairs.push({ sel: r.sel, base, fg, bg: null, big: false, page: true, theme });
+    else if (r.sel.split(',').every((s) => TEXTY.test(s.trim().split(/\s+/).pop()))) pairs.push({ sel: r.sel, base, fg, bg: null, big: big(r), page: true, theme });
+  }
+  const low = new Map(); let checked = 0;
+  for (const [name, set] of themes) {
+    const vars = new Map(); let pageBg = null;
+    for (const r of set) { for (const [k, v] of r.decls) if (k.startsWith('--')) vars.set(k, v); const b = bgOf(r.decls); if (b) pageBg = b; }
+    const resolve = (v, depth = 0) => { if (v == null) return null; v = String(v).trim(); const m = v.match(/^var\(\s*(--[\w-]+)\s*(?:,\s*([\s\S]+))?\)$/); if (!m) return v; if (depth > 6) return null; return vars.has(m[1]) ? resolve(vars.get(m[1]), depth + 1) : m[2] ? resolve(m[2], depth + 1) : null; };
+    const page = parseColor(resolve(pageBg)) || (name ? null : parseColor('#ffffff'));
+    const own = new Set(pairs.filter((p) => name && p.theme === name).map((p) => p.base));
+    for (const p of pairs) {
+      if (p.theme ? p.theme !== name : own.has(p.base)) continue;
+      const f = parseColor(resolve(p.fg)); const b = p.page ? page : parseColor(resolve(p.bg));
+      if (!f || !b || f.a < 1 || b.a < 1) continue; checked++;
+      const ratio = contrastRatio(f, b); const need = p.big ? 3 : 4.5;
+      if (ratio < need) { const key = `${p.sel}|${p.fg}|${p.bg || 'page'}|${ratio.toFixed(2)}`; if (!low.has(key)) low.set(key, { ...p, ratio, need, theme: name }); }
+    }
+  }
+  if (low.size) {
+    const list = [...low.values()].sort((a, b) => a.ratio - b.ratio);
+    warn('contrast', `${where}${low.size} colour pair${sfx(low.size)} in the stylesheet below the WCAG minimum (worst ${list[0].ratio.toFixed(2)}:1, needs ${list[0].need}:1) — fix the tokens, not the pages`, list.slice(0, 8).map((p) => `${p.sel.slice(0, 50)}: ${p.fg} on ${p.page ? 'the page background' : p.bg}${p.theme ? ` (${p.theme})` : ''} = ${p.ratio.toFixed(2)}:1, needs ${p.need}:1`).join('\n') + (list.length > 8 ? `\n… ${list.length - 8} more` : ''));
+  } else if (checked) pass('contrast', `${where}${checked} computable colour pair${sfx(checked)} in the stylesheet meet the WCAG minimum (static: what sits behind the text in the layout is not seen)`);
 }
 
 // ───────────────────────────── Layer 5: semantic (opt-in) ─────────────────────────────
@@ -978,6 +1113,14 @@ async function liveScan(input, hop = 0) {
   if (pairs.length) { if (recipBad.length) fail('hreflang-recip', `hreflang not reciprocal: ${recipBad.length} pair${sfx(recipBad.length)}`, [...new Set(recipBad)].slice(0, 6).join('\n')); else pass('hreflang-recip', `hreflang reciprocal across ${Math.min(pairs.length, 24)} pair${sfx(Math.min(pairs.length, 24))}`); }
   // resource hints
   const missHint = [...ctx.externalOrigins].filter((o2) => !ctx.preconnects.has(o2)); if (missHint.length) info('preconnect', `external origins without preconnect: ${missHint.join(', ')}`);
+  // the home page's own stylesheets (same site, up to 4) and inline <style>: focus, motion and token contrast
+  if (opt.probe) {
+    const css = [...doc.text.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style>/gi)].map((m) => m[1]);
+    const hrefs = home.styleHrefs.map((x) => abs(x, doc.url)).filter((u) => u && sameHost(u)).slice(0, 4);
+    for (const u of hrefs) { const r = await get(u); if (r.status === 200 && r.text) css.push(r.text); }
+    const jsReduced = /matchMedia\([^)]*prefers-reduced-motion/.test(doc.text) ? true : null;
+    cssChecks(css, jsReduced, '');
+  }
   langSummary();
 }
 
@@ -1072,6 +1215,11 @@ async function distScan(dir) {
   if (tot('emptyAnchor')) warn('anchor-empty', `${tot('emptyAnchor')} link${sfx(tot('emptyAnchor'))} with no text, image alt or aria-label`, P.filter((p) => p.emptyAnchor).slice(0, 8).map((p) => `${p.label || p.url} (${p.emptyAnchor})`).join('\n'));
   const orphans = [...routes.keys()].filter((r) => r && r !== '/' && !linkedSet.has(r) && !/\/404(?:\.html)?$/.test(r) && !INDEX_NOINDEX_RE.test(r) && !hidden.has(r)); if (orphans.length) warn('orphan', `${orphans.length} HTML route${sfx(orphans.length)} linked from nowhere in the output (orphans)`, orphans.slice(0, 10).join('\n')); else pass('orphan', 'no orphan routes');
   if (ordered.length > sample.length) info('scope', `${ordered.length} HTML files: ${sample.length} reported in full, the rest only for failures (--pages N to widen)`);
+  // stylesheets in the output (files + inline <style>) and scripts that branch on reduced motion
+  { const styleOf = (t) => [...t.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style>/gi)].map((m) => m[1]);
+    const css = [...new Set([...files.filter((f) => /\.css$/i.test(f) && statSync(f).size < 3e6).map((f) => readFileSync(f, 'utf8')), ...htmls.slice(0, 200).flatMap((f) => styleOf(readFileSync(f, 'utf8')))])];
+    const jsReduced = files.some((f) => /\.m?js$/i.test(f) && statSync(f).size < 5e6 && /prefers-reduced-motion/.test(readFileSync(f, 'utf8'))) || htmls.slice(0, 50).some((f) => /matchMedia\([^)]*prefers-reduced-motion/.test(readFileSync(f, 'utf8')));
+    cssChecks(css, jsReduced, ''); }
   if (firstHome) orgCheck(inspect(readFileSync(firstHome, 'utf8')).jsonld);
   langSummary();
 }
@@ -1229,7 +1377,7 @@ const markupSite = (() => {
   const sorted = ms.map((m) => m.score).sort((a, b) => a - b); const mid = sorted.length / 2; const median = Math.round(sorted.length % 2 ? sorted[Math.floor(mid)] : (sorted[mid - 1] + sorted[mid]) / 2);
   const n = { GREEN: 0, YELLOW: 0, RED: 0 }; for (const m of ms) n[m.flag]++;
   const flag = ms.some((m) => m.fakeNav) || median < 50 ? 'RED' : median < 80 ? 'YELLOW' : 'GREEN';
-  const KEY_LABEL = { 'no-main': 'no <main>', 'multi-main': 'several <main>', 'no-nav': 'no <nav>', wrappers: 'wrapper chains', npw: 'many nodes per word', loose: 'text loose in div/span', inline: 'inline styles', classes: 'many classes per element', unlabeled: 'form fields without a label', nameless: 'buttons without a name', dupids: 'duplicate ids', postab: 'tabindex > 0', hiddenfocus: 'focusable elements inside aria-hidden', iframe: 'iframes without title', autoplay: 'autoplaying video with sound', roles: 'invalid roles', fake: 'click targets that are not links' };
+  const KEY_LABEL = { 'no-main': 'no <main>', 'multi-main': 'several <main>', 'no-nav': 'no <nav>', wrappers: 'wrapper chains', npw: 'many nodes per word', loose: 'text loose in div/span', inline: 'inline styles', classes: 'many classes per element', unlabeled: 'form fields without a label', nameless: 'buttons without a name', dupids: 'duplicate ids', postab: 'tabindex > 0', hiddenfocus: 'focusable elements inside aria-hidden', iframe: 'iframes without title', autoplay: 'autoplaying video with sound', roles: 'invalid roles', ariaref: 'aria references to missing ids', svgname: 'svg images without a name', table: 'tables without <th>', captions: 'videos without captions', fake: 'click targets that are not links' };
   const reasons = new Map(); for (const m of ms) for (const k of new Set((m.keys || []).slice(0, 3))) reasons.set(k, (reasons.get(k) || 0) + 1);
   const common = [...reasons.entries()].sort((a, b) => b[1] - a[1]).filter(([, c]) => c >= Math.ceil(ms.length / 2)).slice(0, 3).map(([k]) => KEY_LABEL[k] || k);
   // the grade is forced RED by navigation crawlers cannot follow, whatever the median: say so next to the grade

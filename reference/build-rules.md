@@ -123,6 +123,33 @@ help from the rest of the site.
 - Every form field has a `<label for>` (or `aria-label`); every button has a
   name; every iframe a `title`; ids are unique.
 
+## DO — accessibility (markup and stylesheets)
+
+- Every `aria-labelledby` / `aria-describedby` points at ids that exist on
+  the same page — check them after any refactor of ids.
+- An icon `<svg role="img">` has a `<title>` (or `aria-label`); a decorative
+  svg has `aria-hidden="true"` and no role.
+- Data tables have `<th>` (with `scope` when both axes are headers); a table
+  used for layout says `role="presentation"`.
+- Video with speech has `<track kind="captions">`; a background video is
+  `muted` (and `playsinline`).
+- Colours are tokens (custom properties) and every text / background pair is
+  checked when the theme is made: 4.5:1 for text, 3:1 for large text
+  (24 px, or 18.6 px bold), icons and the borders of controls. Each theme —
+  dark mode, `[data-theme=…]` variants — is checked on its own.
+- Focus is visible: style `:focus-visible` (outline or ring with 3:1 against
+  its surroundings). Remove the default outline only in the same rule that
+  draws its replacement.
+- Every `@keyframes` animation, parallax, view transition and
+  `scroll-behavior: smooth` has a `@media (prefers-reduced-motion: reduce)`
+  branch that stops it (or the motion sits inside `no-preference`); a script
+  animation checks `matchMedia('(prefers-reduced-motion: reduce)')`.
+- Touch and click targets are at least 24 × 24 px (44 × 44 for primary
+  controls on mobile), or spaced so 24 px circles do not overlap.
+- Menus, dialogs and drawers close with Esc, return focus to the control
+  that opened them, and keep focus inside while open; the tab order follows
+  the DOM order.
+
 ## DON'T
 
 - No second `<h1>` from the content, the sidebar, the footer or a widget —
@@ -130,6 +157,9 @@ help from the rest of the site.
 - No canonical with `.html` on a host that serves clean URLs.
 - No navigation through `onclick` on `div`/`span`, no `javascript:` links, no
   `<a>` without `href`.
+- No `user-scalable=no` and no `maximum-scale` in the viewport; no
+  `outline: none` without a `:focus-visible` style; no animation without a
+  reduced-motion branch.
 - No `tabindex` above 0, no focusable element inside `aria-hidden`, no
   placeholder standing in for a label. Content kept in the DOM but hidden
   (the other language, a mobile copy) gets `hidden` or `inert`, not

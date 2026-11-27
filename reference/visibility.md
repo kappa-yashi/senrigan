@@ -455,6 +455,24 @@ What the grade looks at, and what to do on a page builder:
 | click targets | all `<a href>` | link fields, never "on click" actions for navigation |
 | form fields | each with a label | enable visible labels or set `aria-label` |
 
+Accessibility is visibility for people, and the same markup serves both. What
+a build has to get right, because no scanner sees all of it:
+
+- **Zoom.** `width=device-width, initial-scale=1` and nothing else — never
+  `user-scalable=no` or `maximum-scale`.
+- **Names.** Every control has text, `aria-label` or an `aria-labelledby`
+  whose ids exist on the page; an icon `<svg role="img">` carries a `<title>`
+  or `aria-label`, a decorative one `aria-hidden="true"`.
+- **Contrast.** Colours live in tokens (custom properties), and every text /
+  background token pair is checked when the theme is made: 4.5:1 for text,
+  3:1 for large text and UI parts — in every theme, dark included.
+- **Focus.** Never remove the outline without drawing one: style
+  `:focus-visible`.
+- **Motion.** Every animation, transition of position and smooth scroll has a
+  `prefers-reduced-motion: reduce` branch.
+- **Tables and media.** Data tables have `<th>`; layout tables say
+  `role="presentation"`. Video with speech has a captions track.
+
 ## Checklist before a release
 
 - [ ] `senrigan ./dist --base https://host` — sight clear
@@ -469,6 +487,9 @@ What the grade looks at, and what to do on a page builder:
 - [ ] share one URL in a chat app and look at the card
 - [ ] Search Console: request indexing for changed URLs; read coverage in a
       week
+- [ ] accessibility: no zoom block, contrast tokens checked in every theme,
+      `:focus-visible` styled, reduced-motion branch — then a browser audit
+      (axe / Lighthouse) for what markup cannot show
 - [ ] the 404 page: answers 404, carries `noindex`, and no canonical /
       og:url / hreflang (layouts copy the home's set onto it)
 - [ ] a domain with a past (bought, re-registered, a previous site): in

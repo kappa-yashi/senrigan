@@ -110,7 +110,9 @@ or clone and run `node bin/senrigan.mjs <target>`.
 
 - `<html lang>` present and a BCP 47 tag, agreeing with the page's own
   hreflang entry
-- viewport with `width=device-width`, no zoom blocking
+- viewport with `width=device-width`; zoom blocking (`user-scalable=no`, or a
+  `maximum-scale` under 2) is a failure — low-vision readers enlarge the page
+  (WCAG 1.4.4)
 - `<title>`: present, 15–60 characters and under ~600 px wide (Google cuts
   by width; capitals and Greek run wide — reported on its own, so a
   site-wide line never mixes "too long" with "too wide"), unique across the
@@ -250,8 +252,22 @@ follow (a `<div onclick>` is not a link), and render cost (Core Web Vitals).
   any ancestor; `hidden` and `inert` are the fix, and a whole hidden block of
   links is named as what it usually is — the other language or a mobile copy
   kept in the DOM), iframes without `title`, autoplaying video with sound,
-  invalid ARIA roles. Anti-spam honeypot fields are recognised and not counted
+  invalid ARIA roles, `aria-labelledby` / `aria-describedby` pointing at an
+  id that is not on the page (a dangling reference names nothing — it is not
+  counted as a name), `<svg role="img">` without a name, data tables without
+  `<th>` (a layout table says `role="presentation"`), video with sound and no
+  captions track. Anti-spam honeypot fields are recognised and not counted
   as unlabeled fields; the report asks for `tabindex="-1"` on them
+- **the stylesheets** (dist: every `.css` file and inline `<style>`; live: the
+  home page's own stylesheets, up to four): a focus outline removed with no
+  `:focus-visible` style in its place; `@keyframes` or smooth scrolling with
+  no `prefers-reduced-motion` branch (in CSS, or in a script in dist mode);
+  colour contrast of the pairs the stylesheet makes computable — a rule with
+  both colours, and text rules against the page background — with custom
+  properties resolved per theme (`:root`, the dark colour-scheme branch,
+  `[data-theme=…]`, `.dark`). Hex, `rgb()`, `hsl()`, `oklch()` and `oklab()`
+  are read; 4.5:1 for text, 3:1 for headings and large text. This is a floor:
+  what sits behind the text in the layout is not seen
 - **click targets that are not links** (`div`/`span` with `onclick`,
   `role="link"` without `href`, `javascript:` links)
 
@@ -354,6 +370,9 @@ writes the templates, human or assistant, before the first page);
 
 ## Limits
 
+- Accessibility is the part that can be read from markup and stylesheets.
+  Real contrast on the rendered page, visible focus, keyboard order and traps,
+  and target size need a browser — run axe or Lighthouse for those.
 - It reads the HTML that is served. It does not execute JavaScript, so
   client-rendered content is invisible to it — as it is, at first, to most
   crawlers. Every live report says so in one line: images a script adds (a
